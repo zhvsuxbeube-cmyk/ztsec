@@ -1112,7 +1112,7 @@ namespace ZeroTrace_Security_Official
         {
             if (serverLogsGrid == null || serverLogsGrid.Rows.Count == 0)
                 return true;
-            return serverLogsGrid.FirstDisplayedScrollingRowIndex + serverLogsGrid.DisplayedRowCount >= serverLogsGrid.Rows.Count - 1;
+            return serverLogsGrid.FirstDisplayedScrollingRowIndex + serverLogsGrid.DisplayedRowCount(false) >= serverLogsGrid.Rows.Count - 1;
         }
 
         private void Form1_Load(object sender, EventArgs e)

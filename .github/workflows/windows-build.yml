@@ -196,11 +196,11 @@ jobs:
           $settingsText = Get-Content -LiteralPath $settingsSource -Raw
           $blockedText = Get-Content -LiteralPath $blockedSource -Raw
           $formText = Get-Content -LiteralPath $formSource -Raw
-          if ($settingsText -notmatch 'DataContractJsonSerializer') { throw 'Notification settings must use DataContractJsonSerializer.' }
-          if ($settingsText -match 'XDocument|XElement|XmlDocument|XmlSerializer|System\.Xml|notifications\.xml') { throw 'Legacy XML notification persistence is still present.' }
+          if ($settingsText -notmatch 'JavaScriptSerializer') { throw 'Notification settings must use JavaScriptSerializer.' }
+          if ($settingsText -match 'XDocument|XElement|XmlDocument|XmlSerializer|System\.Xml|DataContractJsonSerializer|notifications\.xml') { throw 'Legacy XML notification persistence is still present.' }
           if ($settingsText -notmatch 'notifications\.json') { throw 'Notification settings JSON path is missing.' }
-          if ($blockedText -notmatch 'DataContractJsonSerializer' -or $blockedText -notmatch 'blocked_connections\.json') { throw 'Blocked connection persistence must use the compact JSON store.' }
-          if ($blockedText -match 'XDocument|XElement|XmlDocument|XmlSerializer|System\.Xml') { throw 'Blocked connection persistence contains legacy XML APIs.' }
+          if ($blockedText -notmatch 'JavaScriptSerializer' -or $blockedText -notmatch 'blocked_connections\.json') { throw 'Blocked connection persistence must use the compact JSON store.' }
+          if ($blockedText -match 'XDocument|XElement|XmlDocument|XmlSerializer|System\.Xml|DataContractJsonSerializer') { throw 'Blocked connection persistence contains legacy XML APIs.' }
           if ($formText -notmatch 'HELLO:FINGERPRINT:' -or $formText -notmatch 'BlockedConnectionStore') { throw 'Fingerprint handshake/blocking server flow is missing.' }
           if ($formText -notmatch 'Fingerprint') { throw 'Fingerprint connection field is missing.' }
           if ($agentSourceText -match 'COMMANDS[^\r\n]*BLOCK|command\s*==\s*["'']BLOCK["'']') { throw 'BLOCK must remain a server-side action and must not be registered by ztsec_agent.py.' }

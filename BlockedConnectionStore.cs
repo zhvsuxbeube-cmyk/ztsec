@@ -1,39 +1,30 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Runtime.Serialization;
-using System.Runtime.Serialization.Json;
+using System.Web.Script.Serialization;
 using System.Text;
 
 namespace ZeroTrace_Security_Official
 {
-    [DataContract]
-    internal sealed class BlockedConnectionRecord
+    public sealed class BlockedConnectionRecord
     {
-        [DataMember(Name = "ip")]
         public string Ip { get; set; }
 
-        [DataMember(Name = "userName")]
         public string UserName { get; set; }
 
-        [DataMember(Name = "fingerprint")]
         public string Fingerprint { get; set; }
 
-        [DataMember(Name = "addedAtUtc")]
         public string AddedAtUtc { get; set; }
     }
 
-    [DataContract]
-    internal sealed class BlockedConnectionDocument
+    public sealed class BlockedConnectionDocument
     {
-        [DataMember(Name = "entries")]
         public Dictionary<string, BlockedConnectionRecord> Entries { get; set; }
     }
 
     internal sealed class BlockedConnectionStore
     {
-        private static readonly DataContractJsonSerializer Serializer =
-            new DataContractJsonSerializer(typeof(BlockedConnectionDocument));
+        private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer();
 
         private readonly object syncRoot = new object();
         private readonly Dictionary<string, BlockedConnectionRecord> entries =
@@ -168,9 +159,9 @@ namespace ZeroTrace_Security_Official
                         return;
 
                     using (FileStream stream = File.OpenRead(settingsPath))
+                    using (StreamReader reader = new StreamReader(stream, Encoding.UTF8, true))
                     {
-                        BlockedConnectionDocument document =
-                            Serializer.ReadObject(stream) as BlockedConnectionDocument;
+                        BlockedConnectionDocument document = Serializer.Deserialize<BlockedConnectionDocument>(reader.ReadToEnd());
                         if (document == null || document.Entries == null)
                             return;
 
@@ -205,8 +196,8 @@ namespace ZeroTrace_Security_Official
                     Entries = new Dictionary<string, BlockedConnectionRecord>(entries, StringComparer.OrdinalIgnoreCase)
                 };
 
-                using (FileStream stream = File.Create(tempPath))
-                    Serializer.WriteObject(stream, document);
+                string json = Serializer.Serialize(document);
+                File.WriteAllText(tempPath, json, new UTF8Encoding(false));
 
                 if (File.Exists(settingsPath))
                     File.Replace(tempPath, settingsPath, null);

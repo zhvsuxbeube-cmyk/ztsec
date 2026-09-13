@@ -25,3 +25,9 @@ Windows notification behavior follows the proven NTHelpdesk implementation patte
 Telegram sends the requested connection message format and now includes Name, Tag, IP and Country. New connection notifications are triggered only when a telemetry session creates a new connection row. Telegram Bot Tokens are persisted with Windows DPAPI under the current Windows user profile rather than stored in plaintext.
 
 CI now validates the Notifications page structure, opens the real page through an application-owned smoke-test trigger, captures it as `gui-screenshot-3.png`, audits it alongside the existing UI screenshots, and packages all three images into `gui-screenshots.zip`.
+
+## JSON persistence compile remediation
+- Replaced `DataContractJsonSerializer` with `JavaScriptSerializer` in notification and blocked-connection stores.
+- Removed `System.Runtime.Serialization` project reference; runtime JSON persistence no longer requires `System.Xml` APIs.
+- Excluded the decrypted Telegram token property from JSON serialization with `ScriptIgnore`.
+- Fixed `DataGridView.DisplayedRowCount` invocation in the Server Logs scroll check.

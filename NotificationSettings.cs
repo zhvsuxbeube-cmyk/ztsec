@@ -1,28 +1,22 @@
 using System;
 using System.IO;
-using System.Runtime.Serialization;
-using System.Runtime.Serialization.Json;
+using System.Web.Script.Serialization;
 using System.Security.Cryptography;
 using System.Text;
 
 namespace ZeroTrace_Security_Official
 {
-    [DataContract]
-    internal sealed class NotificationSettings
+    public sealed class NotificationSettings
     {
-        [DataMember(Name = "windowsNotificationsEnabled")]
         public bool WindowsNotificationsEnabled { get; set; }
 
-        [DataMember(Name = "telegramNotificationsEnabled")]
         public bool TelegramNotificationsEnabled { get; set; }
 
-        [DataMember(Name = "telegramBotTokenProtected")]
         public string TelegramBotTokenProtected { get; set; } = string.Empty;
 
-        [DataMember(Name = "telegramChatId")]
         public string TelegramChatId { get; set; } = string.Empty;
 
-        [IgnoreDataMember]
+        [ScriptIgnore]
         public string TelegramBotToken
         {
             get => NotificationSettingsStore.UnprotectString(TelegramBotTokenProtected);
@@ -32,8 +26,7 @@ namespace ZeroTrace_Security_Official
 
     internal static class NotificationSettingsStore
     {
-        private static readonly DataContractJsonSerializer Serializer =
-            new DataContractJsonSerializer(typeof(NotificationSettings));
+        private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer();
 
         private static string RootDirectory
             => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ZTSecurity");
@@ -53,8 +46,11 @@ namespace ZeroTrace_Security_Official
 
                 using (FileStream stream = File.OpenRead(SettingsPath))
                 {
-                    NotificationSettings settings = Serializer.ReadObject(stream) as NotificationSettings;
-                    return settings ?? new NotificationSettings();
+                    using (StreamReader reader = new StreamReader(stream, Encoding.UTF8, true))
+                    {
+                        NotificationSettings settings = Serializer.Deserialize<NotificationSettings>(reader.ReadToEnd());
+                        return settings ?? new NotificationSettings();
+                    }
                 }
             }
             catch
@@ -73,8 +69,8 @@ namespace ZeroTrace_Security_Official
                 Directory.CreateDirectory(SettingsDirectory);
 
                 string tempPath = SettingsPath + ".tmp";
-                using (FileStream stream = File.Create(tempPath))
-                    Serializer.WriteObject(stream, settings);
+                string json = Serializer.Serialize(settings);
+                File.WriteAllText(tempPath, json, new UTF8Encoding(false));
 
                 if (File.Exists(SettingsPath))
                     File.Replace(tempPath, SettingsPath, null);

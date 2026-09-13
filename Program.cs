@@ -15,6 +15,7 @@ namespace ZeroTrace_Security_Official
             {
                 ConfigureDependencyResolution();
                 ConfigureGlobalErrorLogging();
+                ZTSecurityStorage.EnsureDirectories();
 
                 // DevExpress v24.2 is desktop-oriented; explicitly select the
                 // non-auto-hiding scrollbar mode before any controls are created.

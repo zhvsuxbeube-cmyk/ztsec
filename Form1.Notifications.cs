@@ -2,7 +2,6 @@ using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
-using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -11,53 +10,27 @@ namespace ZeroTrace_Security_Official
     public partial class Form1
     {
         private NotifyIcon notificationsNotifyIcon;
-        private Icon notificationsNotifyIconImage;
-        private Panel notificationsPageRoot;
-        private Label notificationsPageStatusLabel;
-        private CheckBox notificationsWindowsToggle;
-        private Label notificationsWindowsStatusLabel;
-        private TextBox notificationsTelegramTokenTextBox;
-        private TextBox notificationsTelegramChatIdTextBox;
-        private CheckBox notificationsTelegramToggle;
-        private Label notificationsTelegramStatusLabel;
-        private Button notificationsTelegramTestButton;
-        private bool notificationsUiInitializing;
+        private Icon       notificationsNotifyIconImage;
+        private Panel      notificationsPageRoot;
+        private CheckBox   notificationsWindowsToggle;
+        private Label      notificationsWindowsStatusLabel;
+        private TextBox    notificationsTelegramTokenTextBox;
+        private TextBox    notificationsTelegramChatIdTextBox;
+        private CheckBox   notificationsTelegramToggle;
+        private Label      notificationsTelegramStatusLabel;
+        private Button     notificationsTelegramTestButton;
+        private bool       notificationsUiInitializing;
         private NotificationSettings notificationSettings;
 
         // ── Palette ───────────────────────────────────────────────────────────
-        private static readonly Color NB  = Color.FromArgb(30, 30, 30);   // page background
-        private static readonly Color NC  = Color.FromArgb(40, 40, 40);   // card surface
-        private static readonly Color NS  = Color.FromArgb(50, 50, 50);   // card surface elevated
-        private static readonly Color NF  = Color.FromArgb(58, 58, 58);   // input field
-        private static readonly Color NBo = Color.FromArgb(68, 68, 68);   // border
-        private static readonly Color NM  = Color.FromArgb(160, 160, 160); // muted
-        private static readonly Color NW  = Color.White;                   // primary text
-        private static readonly Color NA  = UiTheme.AccentColor;           // #50C090
-
-        // ── Glyph paths (tiny inline SVG-style vectors drawn via GDI+) ───────
-        // Windows icon: simple monitor outline
-        private static GraphicsPath WindowsGlyph()
-        {
-            var p = new GraphicsPath();
-            p.AddRectangle(new RectangleF(1, 1, 22, 15));
-            p.AddRectangle(new RectangleF(9, 16, 6, 3));
-            p.AddLine(6, 19, 18, 19);
-            return p;
-        }
-        // Telegram icon: paper-plane outline
-        private static GraphicsPath TelegramGlyph()
-        {
-            var p = new GraphicsPath();
-            PointF[] pts = {
-                new PointF(1, 12), new PointF(23, 1), new PointF(16, 23),
-                new PointF(11, 16), new PointF(23, 1)
-            };
-            p.AddLines(pts);
-            p.StartFigure();
-            p.AddLine(11, 16, 11, 22);
-            p.AddLine(11, 22, 14, 18);
-            return p;
-        }
+        private static readonly Color NB  = Color.FromArgb(30, 30, 30);    // page background
+        private static readonly Color NC  = Color.FromArgb(40, 40, 40);    // card surface
+        private static readonly Color NS  = Color.FromArgb(50, 50, 50);    // elevated surface
+        private static readonly Color NF  = Color.FromArgb(58, 58, 58);    // input field
+        private static readonly Color NBo = Color.FromArgb(68, 68, 68);    // border
+        private static readonly Color NM  = Color.FromArgb(160, 160, 160); // muted text
+        private static readonly Color NW  = Color.White;                    // primary text
+        private static readonly Color NA  = UiTheme.AccentColor;            // #50C090
 
         // ─────────────────────────────────────────────────────────────────────
 
@@ -76,53 +49,49 @@ namespace ZeroTrace_Security_Official
             notificationsTabPage.BackColor = NB;
             notificationsTabPage.Padding   = new Padding(0);
 
-            // ── notificationsPageRoot IS the scroll container and a direct child
-            //    of notificationsTabPage so the CI check
-            //    notificationsTabPage.Controls.Contains(notificationsPageRoot) passes.
+            // Root fills the entire tab — same pattern as every other page.
             notificationsPageRoot = new Panel
             {
                 Name       = "notificationsPageRoot",
                 Dock       = DockStyle.Fill,
                 BackColor  = NB,
-                AutoScroll = true
+                AutoScroll = true,
+                Padding    = new Padding(24, 20, 24, 24)
             };
 
-            // ── Inner content panel (fixed width, centred inside the scroll area)
+            // ── Content column — stretches with the window ────────────────────
             var contentPanel = new Panel
             {
-                BackColor = NB,
-                Width     = 680,
-                Padding   = new Padding(0)
+                BackColor  = NB,
+                Dock       = DockStyle.None,
+                AutoSize   = false,
+                Padding    = new Padding(0)
             };
-            contentPanel.Anchor = AnchorStyles.Top | AnchorStyles.Left;
 
-            // Centre the content panel as the scroll root resizes
+            // Keep content panel flush with available width minus side padding.
             notificationsPageRoot.Resize += (s, e) =>
             {
-                int cx = Math.Max(0, (notificationsPageRoot.ClientSize.Width - contentPanel.Width) / 2);
-                contentPanel.Left = cx;
+                int avail = notificationsPageRoot.ClientSize.Width
+                            - notificationsPageRoot.Padding.Horizontal;
+                contentPanel.Width = Math.Max(200, avail);
+                contentPanel.Left  = notificationsPageRoot.Padding.Left;
+                contentPanel.Top   = notificationsPageRoot.Padding.Top;
             };
 
             // ── Header ───────────────────────────────────────────────────────
-            var header = new Panel
-            {
-                BackColor = NB,
-                Height    = 88,
-                Dock      = DockStyle.None
-            };
+            var header = new Panel { BackColor = NB, Height = 72 };
 
-            // Vertical accent rule
             var accentRule = new Panel
             {
                 BackColor = NA,
-                Size      = new Size(3, 36),
-                Location  = new Point(0, 14)
+                Size      = new Size(3, 34),
+                Location  = new Point(0, 12)
             };
 
             var titleLabel = new Label
             {
                 AutoSize  = true,
-                Location  = new Point(14, 12),
+                Location  = new Point(14, 10),
                 Font      = new Font("Segoe UI", 17F, FontStyle.Bold, GraphicsUnit.Point),
                 ForeColor = NW,
                 Text      = "Notifications"
@@ -131,57 +100,26 @@ namespace ZeroTrace_Security_Official
             var subtitleLabel = new Label
             {
                 AutoSize  = true,
-                Location  = new Point(15, 46),
+                Location  = new Point(15, 44),
                 Font      = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point),
                 ForeColor = NM,
                 Text      = "Configure how ZeroTrace alerts you when a client connects"
             };
 
-            notificationsPageStatusLabel = new Label
-            {
-                Name      = "notificationsPageStatusLabel",
-                AutoSize  = false,
-                Width     = 180,
-                Height    = 22,
-                TextAlign = ContentAlignment.MiddleRight,
-                Anchor    = AnchorStyles.Top | AnchorStyles.Right,
-                Font      = new Font("Segoe UI", 8.5F, FontStyle.Regular, GraphicsUnit.Point),
-                ForeColor = NM,
-                Text      = "No channels enabled"
-            };
-
             header.Controls.Add(accentRule);
             header.Controls.Add(titleLabel);
             header.Controls.Add(subtitleLabel);
-            header.Controls.Add(notificationsPageStatusLabel);
-
-            // Position the status badge top-right of the header
-            header.Resize += (s, e) =>
-            {
-                notificationsPageStatusLabel.Location = new Point(
-                    header.ClientSize.Width - notificationsPageStatusLabel.Width - 4, 6);
-            };
 
             // ── Divider under header ─────────────────────────────────────────
-            var divider = new Panel
-            {
-                BackColor = NBo,
-                Height    = 1
-            };
+            var divider = new Panel { BackColor = NBo, Height = 1 };
 
             // ── Windows card ─────────────────────────────────────────────────
-            var windowsCard = BuildWindowsSection();
-
-            // ── Gap label between sections ────────────────────────────────────
-            var sectionGap = new Panel { BackColor = NB, Height = 16 };
-
-            // ── Telegram card ─────────────────────────────────────────────────
+            var windowsCard  = BuildWindowsSection();
+            var sectionGap   = new Panel { BackColor = NB, Height = 14 };
             var telegramCard = BuildTelegramSection();
+            var bottomPad    = new Panel { BackColor = NB, Height = 28 };
 
-            // ── Bottom breathing room ─────────────────────────────────────────
-            var bottomPad = new Panel { BackColor = NB, Height = 32 };
-
-            // Stack controls top-to-bottom using FlowLayoutPanel
+            // Stack top-to-bottom
             var flow = new FlowLayoutPanel
             {
                 Dock          = DockStyle.Fill,
@@ -190,18 +128,17 @@ namespace ZeroTrace_Security_Official
                 AutoSize      = true,
                 AutoSizeMode  = AutoSizeMode.GrowAndShrink,
                 BackColor     = NB,
-                Padding       = new Padding(0, 16, 0, 0)
+                Padding       = new Padding(0, 14, 0, 0)
             };
 
-            void SetWidth(Control c) { c.Width = contentPanel.Width; }
+            void SyncWidth(Control c) => c.Width = contentPanel.Width;
 
-            // Set widths
-            SetWidth(header);
-            SetWidth(divider);
-            SetWidth(windowsCard);
-            SetWidth(sectionGap);
-            SetWidth(telegramCard);
-            SetWidth(bottomPad);
+            SyncWidth(header);
+            SyncWidth(divider);
+            SyncWidth(windowsCard);
+            SyncWidth(sectionGap);
+            SyncWidth(telegramCard);
+            SyncWidth(bottomPad);
 
             flow.Controls.Add(header);
             flow.Controls.Add(divider);
@@ -212,29 +149,25 @@ namespace ZeroTrace_Security_Official
 
             contentPanel.Controls.Add(flow);
 
-            // Sync widths on content panel resize
             contentPanel.Resize += (s, e) =>
             {
                 foreach (Control c in flow.Controls)
                     c.Width = contentPanel.Width;
             };
 
-            // Auto-height the content panel from flow
             flow.Layout += (s, e) =>
-            {
-                contentPanel.Height = flow.PreferredSize.Height + 32;
-            };
+                contentPanel.Height = flow.PreferredSize.Height + 28;
 
             notificationsPageRoot.Controls.Add(contentPanel);
-
-            // Trigger initial centering
             notificationsPageRoot.PerformLayout();
-            int initCx = Math.Max(0, (notificationsTabPage.ClientSize.Width - contentPanel.Width) / 2);
-            contentPanel.Left = initCx;
-            contentPanel.Top  = 0;
 
-            // notificationsPageRoot is added directly to the tab page — the CI check
-            // notificationsTabPage.Controls.Contains(notificationsPageRoot) passes.
+            // Force initial width sync
+            int initAvail = notificationsTabPage.ClientSize.Width
+                            - notificationsPageRoot.Padding.Horizontal;
+            contentPanel.Width = Math.Max(200, initAvail);
+            contentPanel.Left  = notificationsPageRoot.Padding.Left;
+            contentPanel.Top   = notificationsPageRoot.Padding.Top;
+
             notificationsTabPage.Controls.Add(notificationsPageRoot);
             notificationsTabPage.ResumeLayout(true);
         }
@@ -246,13 +179,10 @@ namespace ZeroTrace_Security_Official
         {
             var card = CreateSectionCard();
 
-            // ── Section header row ────────────────────────────────────────────
-            var iconBox = CreateGlyphIcon(DrawWindowsIcon);
-
             var sectionTitle = new Label
             {
                 AutoSize  = true,
-                Location  = new Point(52, 20),
+                Location  = new Point(20, 20),
                 Font      = new Font("Segoe UI Semibold", 11F, FontStyle.Bold, GraphicsUnit.Point),
                 ForeColor = NW,
                 Text      = "Windows Notifications"
@@ -261,34 +191,31 @@ namespace ZeroTrace_Security_Official
             var sectionDesc = new Label
             {
                 AutoSize  = false,
-                Width     = 460,
                 Height    = 20,
-                Location  = new Point(52, 46),
+                Location  = new Point(20, 46),
                 Font      = new Font("Segoe UI", 8.75F, FontStyle.Regular, GraphicsUnit.Point),
                 ForeColor = NM,
-                Text      = "Display a Windows toast when a new client connects"
+                Text      = "Show a Windows toast when a new client connects"
             };
 
-            // ── Divider ───────────────────────────────────────────────────────
             var innerDivider = new Panel
             {
                 BackColor = NBo,
                 Height    = 1,
-                Location  = new Point(0, 80)
+                Location  = new Point(0, 78)
             };
 
-            // ── Toggle row ────────────────────────────────────────────────────
             var toggleArea = new Panel
             {
                 BackColor = NS,
-                Height    = 60,
-                Location  = new Point(0, 81)
+                Height    = 56,
+                Location  = new Point(0, 79)
             };
 
             var togglePrompt = new Label
             {
                 AutoSize  = true,
-                Location  = new Point(20, 20),
+                Location  = new Point(20, 18),
                 Font      = new Font("Segoe UI", 9.25F, FontStyle.Regular, GraphicsUnit.Point),
                 ForeColor = NW,
                 Text      = "Enable Windows alerts"
@@ -307,48 +234,31 @@ namespace ZeroTrace_Security_Official
                 Text      = "Disabled"
             };
 
-            // Position toggle + status badge right-aligned
             toggleArea.Resize += (s, e) =>
             {
-                notificationsWindowsToggle.Location = new Point(toggleArea.Width - notificationsWindowsToggle.Width - 20, 14);
+                notificationsWindowsToggle.Location = new Point(
+                    toggleArea.Width - notificationsWindowsToggle.Width - 20, 14);
                 notificationsWindowsStatusLabel.Location = new Point(
-                    notificationsWindowsToggle.Left - notificationsWindowsStatusLabel.Width - 10,
-                    20);
+                    notificationsWindowsToggle.Left - notificationsWindowsStatusLabel.Width - 10, 18);
             };
 
             toggleArea.Controls.Add(togglePrompt);
             toggleArea.Controls.Add(notificationsWindowsStatusLabel);
             toggleArea.Controls.Add(notificationsWindowsToggle);
 
-            // ── Footer hint ───────────────────────────────────────────────────
-            var hint = new Label
-            {
-                AutoSize  = false,
-                Height    = 40,
-                Location  = new Point(0, 141),
-                Padding   = new Padding(20, 10, 20, 0),
-                Font      = new Font("Segoe UI", 8F, FontStyle.Regular, GraphicsUnit.Point),
-                ForeColor = Color.FromArgb(110, 110, 110),
-                Text      = "Uses the standard Windows notification surface — alerts fire only for new connections, not reconnections."
-            };
-
-            card.Controls.Add(iconBox);
             card.Controls.Add(sectionTitle);
             card.Controls.Add(sectionDesc);
             card.Controls.Add(innerDivider);
             card.Controls.Add(toggleArea);
-            card.Controls.Add(hint);
 
-            // Sync widths
             card.Resize += (s, e) =>
             {
                 innerDivider.Width = card.ClientSize.Width;
                 toggleArea.Width   = card.ClientSize.Width;
-                hint.Width         = card.ClientSize.Width;
-                sectionDesc.Width  = card.ClientSize.Width - 60;
+                sectionDesc.Width  = card.ClientSize.Width - 40;
             };
 
-            card.Height = 182;
+            card.Height = 135;
             return card;
         }
 
@@ -359,13 +269,10 @@ namespace ZeroTrace_Security_Official
         {
             var card = CreateSectionCard();
 
-            // ── Section header row ────────────────────────────────────────────
-            var iconBox = CreateGlyphIcon(DrawTelegramIcon);
-
             var sectionTitle = new Label
             {
                 AutoSize  = true,
-                Location  = new Point(52, 20),
+                Location  = new Point(20, 20),
                 Font      = new Font("Segoe UI Semibold", 11F, FontStyle.Bold, GraphicsUnit.Point),
                 ForeColor = NW,
                 Text      = "Telegram Notifications"
@@ -374,35 +281,32 @@ namespace ZeroTrace_Security_Official
             var sectionDesc = new Label
             {
                 AutoSize  = false,
-                Width     = 460,
                 Height    = 20,
-                Location  = new Point(52, 46),
+                Location  = new Point(20, 46),
                 Font      = new Font("Segoe UI", 8.75F, FontStyle.Regular, GraphicsUnit.Point),
                 ForeColor = NM,
                 Text      = "Forward connection alerts to a Telegram bot chat"
             };
 
-            // ── Divider ───────────────────────────────────────────────────────
             var innerDivider = new Panel
             {
                 BackColor = NBo,
                 Height    = 1,
-                Location  = new Point(0, 80)
+                Location  = new Point(0, 78)
             };
 
             // ── Fields area ───────────────────────────────────────────────────
             var fieldsArea = new Panel
             {
                 BackColor = NS,
-                Height    = 160,
-                Location  = new Point(0, 81)
+                Height    = 152,
+                Location  = new Point(0, 79)
             };
 
-            // Bot Token
             var tokenLabel = new Label
             {
                 AutoSize  = true,
-                Location  = new Point(20, 18),
+                Location  = new Point(20, 16),
                 Font      = new Font("Segoe UI Semibold", 8.5F, FontStyle.Bold, GraphicsUnit.Point),
                 ForeColor = NW,
                 Text      = "Bot Token"
@@ -410,14 +314,13 @@ namespace ZeroTrace_Security_Official
 
             notificationsTelegramTokenTextBox = CreateStyledTextBox(true);
             notificationsTelegramTokenTextBox.Name         = "notificationsTelegramTokenTextBox";
-            notificationsTelegramTokenTextBox.Location     = new Point(20, 38);
+            notificationsTelegramTokenTextBox.Location     = new Point(20, 34);
             notificationsTelegramTokenTextBox.TextChanged += notificationsTelegramSettingsChanged;
 
-            // Chat ID
             var chatLabel = new Label
             {
                 AutoSize  = true,
-                Location  = new Point(20, 83),
+                Location  = new Point(20, 78),
                 Font      = new Font("Segoe UI Semibold", 8.5F, FontStyle.Bold, GraphicsUnit.Point),
                 ForeColor = NW,
                 Text      = "Chat ID"
@@ -425,10 +328,9 @@ namespace ZeroTrace_Security_Official
 
             notificationsTelegramChatIdTextBox = CreateStyledTextBox(false);
             notificationsTelegramChatIdTextBox.Name         = "notificationsTelegramChatIdTextBox";
-            notificationsTelegramChatIdTextBox.Location     = new Point(20, 103);
+            notificationsTelegramChatIdTextBox.Location     = new Point(20, 96);
             notificationsTelegramChatIdTextBox.TextChanged  += notificationsTelegramSettingsChanged;
 
-            // Sync field widths
             fieldsArea.Resize += (s, e) =>
             {
                 int fw = fieldsArea.ClientSize.Width - 40;
@@ -441,26 +343,25 @@ namespace ZeroTrace_Security_Official
             fieldsArea.Controls.Add(chatLabel);
             fieldsArea.Controls.Add(notificationsTelegramChatIdTextBox);
 
-            // ── Divider ───────────────────────────────────────────────────────
+            // ── Action divider + row ──────────────────────────────────────────
             var actionDivider = new Panel
             {
                 BackColor = NBo,
                 Height    = 1,
-                Location  = new Point(0, 241)
+                Location  = new Point(0, 231)
             };
 
-            // ── Toggle + test-button row ──────────────────────────────────────
             var actionRow = new Panel
             {
                 BackColor = NC,
-                Height    = 62,
-                Location  = new Point(0, 242)
+                Height    = 60,
+                Location  = new Point(0, 232)
             };
 
             var togglePrompt = new Label
             {
                 AutoSize  = true,
-                Location  = new Point(20, 21),
+                Location  = new Point(20, 20),
                 Font      = new Font("Segoe UI", 9.25F, FontStyle.Regular, GraphicsUnit.Point),
                 ForeColor = NW,
                 Text      = "Enable Telegram alerts"
@@ -481,18 +382,18 @@ namespace ZeroTrace_Security_Official
 
             notificationsTelegramTestButton = new Button
             {
-                Name             = "notificationsTelegramTestButton",
-                Text             = "Send Test",
-                AutoSize         = false,
-                Size             = new Size(108, 32),
-                FlatStyle        = FlatStyle.Flat,
-                BackColor        = NA,
-                ForeColor        = Color.White,
-                Font             = new Font("Segoe UI Semibold", 8.75F, FontStyle.Bold, GraphicsUnit.Point),
+                Name      = "notificationsTelegramTestButton",
+                Text      = "Send Test",
+                AutoSize  = false,
+                Size      = new Size(100, 30),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = NA,
+                ForeColor = Color.White,
+                Font      = new Font("Segoe UI Semibold", 8.75F, FontStyle.Bold, GraphicsUnit.Point),
                 UseVisualStyleBackColor = false,
-                Cursor           = Cursors.Hand
+                Cursor    = Cursors.Hand
             };
-            notificationsTelegramTestButton.FlatAppearance.BorderSize  = 0;
+            notificationsTelegramTestButton.FlatAppearance.BorderSize = 0;
             notificationsTelegramTestButton.FlatAppearance.MouseOverBackColor =
                 Color.FromArgb(
                     Math.Min(255, NA.R + 18),
@@ -500,15 +401,14 @@ namespace ZeroTrace_Security_Official
                     Math.Min(255, NA.B + 18));
             notificationsTelegramTestButton.Click += notificationsTelegramTestButton_Click;
 
-            // Layout right-side controls
             actionRow.Resize += (s, e) =>
             {
                 notificationsTelegramTestButton.Location = new Point(
                     actionRow.Width - notificationsTelegramTestButton.Width - 20, 15);
                 notificationsTelegramToggle.Location = new Point(
-                    notificationsTelegramTestButton.Left - notificationsTelegramToggle.Width - 14, 15);
+                    notificationsTelegramTestButton.Left - notificationsTelegramToggle.Width - 14, 16);
                 notificationsTelegramStatusLabel.Location = new Point(
-                    notificationsTelegramToggle.Left - notificationsTelegramStatusLabel.Width - 10, 21);
+                    notificationsTelegramToggle.Left - notificationsTelegramStatusLabel.Width - 10, 20);
             };
 
             actionRow.Controls.Add(togglePrompt);
@@ -516,39 +416,23 @@ namespace ZeroTrace_Security_Official
             actionRow.Controls.Add(notificationsTelegramToggle);
             actionRow.Controls.Add(notificationsTelegramTestButton);
 
-            // ── Footer hint ───────────────────────────────────────────────────
-            var hint = new Label
-            {
-                AutoSize  = false,
-                Height    = 40,
-                Location  = new Point(0, 304),
-                Padding   = new Padding(20, 10, 20, 0),
-                Font      = new Font("Segoe UI", 8F, FontStyle.Regular, GraphicsUnit.Point),
-                ForeColor = Color.FromArgb(110, 110, 110),
-                Text      = "\"Send Test\" fires the same payload a real connection would. Confirm via @BotFather that your token is active."
-            };
-
-            card.Controls.Add(iconBox);
             card.Controls.Add(sectionTitle);
             card.Controls.Add(sectionDesc);
             card.Controls.Add(innerDivider);
             card.Controls.Add(fieldsArea);
             card.Controls.Add(actionDivider);
             card.Controls.Add(actionRow);
-            card.Controls.Add(hint);
 
-            // Sync widths on card resize
             card.Resize += (s, e) =>
             {
                 innerDivider.Width  = card.ClientSize.Width;
                 fieldsArea.Width    = card.ClientSize.Width;
                 actionDivider.Width = card.ClientSize.Width;
                 actionRow.Width     = card.ClientSize.Width;
-                hint.Width          = card.ClientSize.Width;
-                sectionDesc.Width   = card.ClientSize.Width - 60;
+                sectionDesc.Width   = card.ClientSize.Width - 40;
             };
 
-            card.Height = 345;
+            card.Height = 292;
             return card;
         }
 
@@ -556,102 +440,35 @@ namespace ZeroTrace_Security_Official
         // SHARED HELPERS
         // ════════════════════════════════════════════════════════════════════════
 
-        /// <summary>Rounded-corner card surface with subtle border.</summary>
         private Panel CreateSectionCard()
         {
             var card = new Panel
             {
                 BackColor = NC,
-                Margin    = new Padding(0, 12, 0, 0),
+                Margin    = new Padding(0, 10, 0, 0),
                 Padding   = new Padding(0)
             };
 
             card.Paint += (s, e) =>
             {
-                var g   = e.Graphics;
+                var g = e.Graphics;
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 var rc = new Rectangle(0, 0, card.Width - 1, card.Height - 1);
-                // Rounded rect path
-                int r = 8;
-                using (var path = RoundedRect(rc, r))
+                using (var path   = RoundedRect(rc, 8))
                 using (var border = new Pen(NBo, 1F))
                     g.DrawPath(border, path);
             };
 
-            // Clip children to rounded corners
             card.Resize += (s, e) =>
             {
-                var rc   = new Rectangle(0, 0, card.Width, card.Height);
+                var rc = new Rectangle(0, 0, card.Width, card.Height);
                 using (var path = RoundedRect(rc, 8))
-                {
-                    var rgn = new Region(path);
-                    card.Region = rgn;
-                }
+                    card.Region = new Region(path);
             };
 
             return card;
         }
 
-        /// <summary>24×24 icon box that paints a glyph in the accent colour.</summary>
-        private Panel CreateGlyphIcon(Action<Graphics, Rectangle> draw)
-        {
-            var box = new Panel
-            {
-                Location  = new Point(18, 16),
-                Size      = new Size(28, 28),
-                BackColor = Color.FromArgb(50, NA.R, NA.G, NA.B)
-            };
-            box.Paint += (s, e) =>
-            {
-                var g = e.Graphics;
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                draw(g, new Rectangle(0, 0, box.Width, box.Height));
-            };
-
-            // Pill-shaped background
-            box.Resize += (s, e) =>
-            {
-                var rc   = new Rectangle(0, 0, box.Width, box.Height);
-                using (var path = RoundedRect(rc, 6))
-                    box.Region = new Region(path);
-            };
-
-            return box;
-        }
-
-        private void DrawWindowsIcon(Graphics g, Rectangle r)
-        {
-            using (var pen = new Pen(NA, 1.5F))
-            {
-                // Monitor body
-                g.DrawRectangle(pen, 4, 4, 20, 14);
-                // Stand
-                g.DrawLine(pen, 14, 18, 14, 22);
-                // Base
-                g.DrawLine(pen, 10, 22, 18, 22);
-            }
-        }
-
-        private void DrawTelegramIcon(Graphics g, Rectangle r)
-        {
-            using (var pen = new Pen(NA, 1.5F))
-            {
-                // Paper plane
-                PointF[] plane = {
-                    new PointF(2, 14), new PointF(26, 2), new PointF(18, 26),
-                    new PointF(12, 18), new PointF(26, 2)
-                };
-                g.DrawLines(pen, plane);
-                g.DrawLine(pen, 12, 18, 12, 24);
-                g.DrawLine(pen, 12, 24, 15, 20);
-                g.DrawLine(pen, 2, 14, 12, 18);
-            }
-        }
-
-        /// <summary>
-        /// Pill-shaped ON/OFF toggle that matches the ZeroTrace dark theme.
-        /// Rendered entirely with GDI+ so no OS visual-style override is needed.
-        /// </summary>
         private CheckBox CreatePillToggle()
         {
             var toggle = new CheckBox
@@ -668,29 +485,26 @@ namespace ZeroTrace_Security_Official
                 Cursor                = Cursors.Hand,
                 TextAlign             = ContentAlignment.MiddleCenter
             };
-            toggle.FlatAppearance.BorderSize  = 0;
-            toggle.FlatAppearance.BorderColor = NBo;
-            toggle.FlatAppearance.CheckedBackColor   = NA;
-            toggle.FlatAppearance.MouseDownBackColor = Color.Transparent;
-            toggle.FlatAppearance.MouseOverBackColor = Color.Transparent;
+            toggle.FlatAppearance.BorderSize             = 0;
+            toggle.FlatAppearance.BorderColor            = NBo;
+            toggle.FlatAppearance.CheckedBackColor       = NA;
+            toggle.FlatAppearance.MouseDownBackColor     = Color.Transparent;
+            toggle.FlatAppearance.MouseOverBackColor     = Color.Transparent;
 
             toggle.Paint += (s, e) =>
             {
-                var cb = (CheckBox)s;
-                var g  = e.Graphics;
+                var  cb        = (CheckBox)s;
+                var  g         = e.Graphics;
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-
                 bool on        = cb.Checked;
                 var  bgColor   = on ? NA : NF;
                 var  textColor = on ? Color.White : NM;
                 var  rc        = new Rectangle(0, 0, cb.Width - 1, cb.Height - 1);
 
-                // Pill background
                 using (var path = RoundedRect(rc, cb.Height / 2))
                 using (var fill = new SolidBrush(bgColor))
                     g.FillPath(fill, path);
 
-                // Border only when off
                 if (!on)
                 {
                     using (var path = RoundedRect(rc, cb.Height / 2))
@@ -698,65 +512,54 @@ namespace ZeroTrace_Security_Official
                         g.DrawPath(pen, path);
                 }
 
-                // Knob
-                int knobSize   = cb.Height - 8;
-                int knobLeft   = on ? cb.Width - knobSize - 4 : 4;
-                var knobRect   = new Rectangle(knobLeft, 4, knobSize, knobSize);
-                var knobColor  = on ? Color.White : NM;
-                using (var b = new SolidBrush(knobColor))
-                    g.FillEllipse(b, knobRect);
+                int knobSize = cb.Height - 8;
+                int knobLeft = on ? cb.Width - knobSize - 4 : 4;
+                using (var b = new SolidBrush(on ? Color.White : NM))
+                    g.FillEllipse(b, new Rectangle(knobLeft, 4, knobSize, knobSize));
 
-                // Label
-                string label      = on ? "ON" : "OFF";
-                var    labelFont  = new Font("Segoe UI Semibold", 7.5F, FontStyle.Bold, GraphicsUnit.Point);
+                string label     = on ? "ON" : "OFF";
+                var    labelFont = new Font("Segoe UI Semibold", 7.5F, FontStyle.Bold, GraphicsUnit.Point);
                 var    labelBrush = new SolidBrush(textColor);
-                var    sf         = new StringFormat { Alignment = on ? StringAlignment.Near : StringAlignment.Far,
-                                                       LineAlignment = StringAlignment.Center };
-                int labelLeft   = on ? 8 : 0;
-                int labelWidth  = cb.Width - knobSize - 12;
-                var labelRectF  = on
-                    ? new RectangleF(8,              0, labelWidth, cb.Height)
-                    : new RectangleF(knobSize + 4,   0, labelWidth, cb.Height);
+                var    sf        = new StringFormat
+                {
+                    Alignment     = on ? StringAlignment.Near : StringAlignment.Far,
+                    LineAlignment = StringAlignment.Center
+                };
+                int labelWidth = cb.Width - knobSize - 12;
+                var labelRectF = on
+                    ? new RectangleF(8,           0, labelWidth, cb.Height)
+                    : new RectangleF(knobSize + 4, 0, labelWidth, cb.Height);
                 g.DrawString(label, labelFont, labelBrush, labelRectF, sf);
                 labelFont.Dispose();
                 labelBrush.Dispose();
             };
 
-            // Redraw on state change so the paint handler picks up Checked
-            toggle.CheckedChanged += (s, e) =>
-            {
-                var cb = (CheckBox)s;
-                cb.Invalidate();
-            };
-
+            toggle.CheckedChanged += (s, e) => ((CheckBox)s).Invalidate();
             return toggle;
         }
 
-        /// <summary>Borderless text-box styled to match the dark theme.</summary>
         private TextBox CreateStyledTextBox(bool password)
         {
-            var tb = new TextBox
+            return new TextBox
             {
                 BorderStyle           = BorderStyle.FixedSingle,
                 BackColor             = NF,
                 ForeColor             = NW,
                 Font                  = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point),
-                Height                = 30,
+                Height                = 28,
                 UseSystemPasswordChar = password,
                 Margin                = new Padding(0)
             };
-            return tb;
         }
 
-        /// <summary>Returns a GraphicsPath describing a rounded rectangle.</summary>
         private static GraphicsPath RoundedRect(Rectangle r, int radius)
         {
-            int d = radius * 2;
+            int d    = radius * 2;
             var path = new GraphicsPath();
-            path.AddArc(r.X, r.Y, d, d, 180, 90);
-            path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
-            path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-            path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            path.AddArc(r.X,           r.Y,            d, d, 180, 90);
+            path.AddArc(r.Right - d,   r.Y,            d, d, 270, 90);
+            path.AddArc(r.Right - d,   r.Bottom - d,   d, d,   0, 90);
+            path.AddArc(r.X,           r.Bottom - d,   d, d,  90, 90);
             path.CloseFigure();
             return path;
         }
@@ -764,6 +567,7 @@ namespace ZeroTrace_Security_Official
         // ════════════════════════════════════════════════════════════════════════
         // SETTINGS APPLY / UPDATE
         // ════════════════════════════════════════════════════════════════════════
+
         private void ApplyNotificationSettingsToUi()
         {
             if (notificationSettings == null)
@@ -772,10 +576,10 @@ namespace ZeroTrace_Security_Official
             notificationsUiInitializing = true;
             try
             {
-                notificationsWindowsToggle.Checked           = notificationSettings.WindowsNotificationsEnabled;
-                notificationsTelegramTokenTextBox.Text       = notificationSettings.TelegramBotToken  ?? string.Empty;
-                notificationsTelegramChatIdTextBox.Text      = notificationSettings.TelegramChatId    ?? string.Empty;
-                notificationsTelegramToggle.Checked          = notificationSettings.TelegramNotificationsEnabled;
+                notificationsWindowsToggle.Checked          = notificationSettings.WindowsNotificationsEnabled;
+                notificationsTelegramTokenTextBox.Text      = notificationSettings.TelegramBotToken  ?? string.Empty;
+                notificationsTelegramChatIdTextBox.Text     = notificationSettings.TelegramChatId    ?? string.Empty;
+                notificationsTelegramToggle.Checked         = notificationSettings.TelegramNotificationsEnabled;
             }
             finally
             {
@@ -795,8 +599,8 @@ namespace ZeroTrace_Security_Official
 
             try
             {
-                notificationsNotifyIconImage       = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-                notificationsNotifyIcon.Icon        = notificationsNotifyIconImage ?? SystemIcons.Information;
+                notificationsNotifyIconImage  = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+                notificationsNotifyIcon.Icon  = notificationsNotifyIconImage ?? SystemIcons.Information;
             }
             catch
             {
@@ -807,6 +611,7 @@ namespace ZeroTrace_Security_Official
         // ════════════════════════════════════════════════════════════════════════
         // EVENT HANDLERS
         // ════════════════════════════════════════════════════════════════════════
+
         private void notificationsWindowsToggle_CheckedChanged(object sender, EventArgs e)
         {
             if (notificationsUiInitializing) return;
@@ -848,7 +653,7 @@ namespace ZeroTrace_Security_Official
                 (!TelegramNotificationService.IsValidBotToken(notificationSettings.TelegramBotToken) ||
                  !TelegramNotificationService.IsValidChatId(notificationSettings.TelegramChatId)))
             {
-                notificationsTelegramToggle.Checked            = false;
+                notificationsTelegramToggle.Checked               = false;
                 notificationSettings.TelegramNotificationsEnabled = false;
             }
 
@@ -861,7 +666,7 @@ namespace ZeroTrace_Security_Official
             if (notificationsWindowsStatusLabel != null)
             {
                 notificationsWindowsStatusLabel.Text      = notificationsWindowsToggle.Checked ? "Enabled" : "Disabled";
-                notificationsWindowsStatusLabel.ForeColor = notificationsWindowsToggle.Checked ? NA : NM;
+                notificationsWindowsStatusLabel.ForeColor = NM;
             }
 
             if (notificationsTelegramStatusLabel != null)
@@ -872,25 +677,17 @@ namespace ZeroTrace_Security_Official
                 if (!valid && notificationsTelegramToggle.Checked)
                     notificationsTelegramToggle.Checked = false;
 
-                notificationsTelegramStatusLabel.Text = notificationsTelegramToggle.Checked ? "Enabled" :
+                notificationsTelegramStatusLabel.Text =
+                    notificationsTelegramToggle.Checked ? "Enabled" :
                     (valid ? "Ready" : "Setup required");
-                notificationsTelegramStatusLabel.ForeColor = notificationsTelegramToggle.Checked ? NA : NM;
-            }
-
-            if (notificationsPageStatusLabel != null)
-            {
-                int enabled = (notificationsWindowsToggle.Checked ? 1 : 0) +
-                              (notificationsTelegramToggle.Checked  ? 1 : 0);
-                notificationsPageStatusLabel.Text =
-                    enabled == 0 ? "No channels enabled" :
-                    enabled == 1 ? "1 channel active" : "Both channels active";
-                notificationsPageStatusLabel.ForeColor = enabled > 0 ? NA : NM;
+                notificationsTelegramStatusLabel.ForeColor = NM;
             }
         }
 
         // ════════════════════════════════════════════════════════════════════════
         // TELEGRAM TEST
         // ════════════════════════════════════════════════════════════════════════
+
         private void notificationsTelegramTestButton_Click(object sender, EventArgs e)
         {
             string token  = notificationsTelegramTokenTextBox.Text.Trim();
@@ -907,7 +704,7 @@ namespace ZeroTrace_Security_Official
                 return;
             }
 
-            notificationsTelegramTestButton.Enabled   = false;
+            notificationsTelegramTestButton.Enabled    = false;
             notificationsTelegramStatusLabel.Text      = "Sending…";
             notificationsTelegramStatusLabel.ForeColor = NM;
 
@@ -922,9 +719,9 @@ namespace ZeroTrace_Security_Official
                     {
                         notificationsTelegramTestButton.Enabled    = true;
                         notificationsTelegramStatusLabel.Text      = "Test sent";
-                        notificationsTelegramStatusLabel.ForeColor = NA;
+                        notificationsTelegramStatusLabel.ForeColor = NM;
                         MessageBox.Show(
-                            "Test connection sent successfully.",
+                            "Test message sent successfully.",
                             "Telegram Notifications",
                             MessageBoxButtons.OK,
                             MessageBoxIcon.Information);
@@ -952,6 +749,7 @@ namespace ZeroTrace_Security_Official
         // ════════════════════════════════════════════════════════════════════════
         // RUNTIME NOTIFICATION DISPATCH
         // ════════════════════════════════════════════════════════════════════════
+
         private void HandleNewConnectionNotification(string clientName, string tag, string ipAddress, string country)
         {
             var settings = new NotificationSettings
@@ -1019,14 +817,15 @@ namespace ZeroTrace_Security_Official
         }
 
         // ════════════════════════════════════════════════════════════════════════
-        // CI SMOKE TEST HELPER (unchanged behaviour)
+        // CI SMOKE TEST HELPER
         // ════════════════════════════════════════════════════════════════════════
+
         private void NavigateToNotificationsForCi()
         {
             if (!string.Equals(Environment.GetEnvironmentVariable("ZTSEC_CI_SMOKE"), "1", StringComparison.Ordinal))
                 return;
 
-            string baseDir   = AppDomain.CurrentDomain.BaseDirectory;
+            string baseDir    = AppDomain.CurrentDomain.BaseDirectory;
             string markerPath = Path.Combine(baseDir, "ci-notifications-page-opened.flag");
             string errorPath  = Path.Combine(baseDir, "ci-notifications-page-error.txt");
 
@@ -1037,35 +836,35 @@ namespace ZeroTrace_Security_Official
                 notificationsTabPage.PerformLayout();
                 xtraTabControl1.PerformLayout();
 
-                bool selectedPage          = ReferenceEquals(xtraTabControl1.SelectedTabPage, notificationsTabPage);
-                bool rootVisible           = notificationsPageRoot != null && notificationsPageRoot.Visible &&
-                                             notificationsPageRoot.ClientSize.Width  > 0 &&
-                                             notificationsPageRoot.ClientSize.Height > 0;
-                bool windowsToggleReady    = notificationsWindowsToggle    != null && notificationsWindowsToggle.Visible;
-                bool telegramTokenReady    = notificationsTelegramTokenTextBox  != null && notificationsTelegramTokenTextBox.Visible;
-                bool telegramChatIdReady   = notificationsTelegramChatIdTextBox != null && notificationsTelegramChatIdTextBox.Visible;
-                bool testButtonReady       = notificationsTelegramTestButton     != null && notificationsTelegramTestButton.Visible;
+                bool selectedPage        = ReferenceEquals(xtraTabControl1.SelectedTabPage, notificationsTabPage);
+                bool rootVisible         = notificationsPageRoot != null && notificationsPageRoot.Visible &&
+                                           notificationsPageRoot.ClientSize.Width  > 0 &&
+                                           notificationsPageRoot.ClientSize.Height > 0;
+                bool windowsToggleReady  = notificationsWindowsToggle    != null && notificationsWindowsToggle.Visible;
+                bool telegramTokenReady  = notificationsTelegramTokenTextBox  != null && notificationsTelegramTokenTextBox.Visible;
+                bool telegramChatIdReady = notificationsTelegramChatIdTextBox != null && notificationsTelegramChatIdTextBox.Visible;
+                bool testButtonReady     = notificationsTelegramTestButton     != null && notificationsTelegramTestButton.Visible;
 
                 if (!selectedPage || !rootVisible || !windowsToggleReady || !telegramTokenReady || !telegramChatIdReady || !testButtonReady)
                 {
                     File.WriteAllText(errorPath,
                         "OPEN_NOTIFICATIONS_FAILED|" + DateTime.UtcNow.ToString("O") +
-                        "|selected=" + selectedPage +
-                        ",rootVisible=" + rootVisible +
-                        ",windowsToggle=" + windowsToggleReady +
-                        ",telegramToken=" + telegramTokenReady +
-                        ",telegramChatId=" + telegramChatIdReady +
-                        ",testButton=" + testButtonReady);
+                        "|selected="      + selectedPage        +
+                        ",rootVisible="   + rootVisible         +
+                        ",windowsToggle=" + windowsToggleReady  +
+                        ",telegramToken=" + telegramTokenReady  +
+                        ",telegramChatId="+ telegramChatIdReady +
+                        ",testButton="    + testButtonReady);
                     return;
                 }
 
                 File.WriteAllText(markerPath,
                     "OPENED|" + DateTime.UtcNow.ToString("O") +
                     "|Title=Notifications" +
-                    "|WindowsToggle=" + windowsToggleReady +
-                    "|TelegramToken=" + telegramTokenReady +
+                    "|WindowsToggle="  + windowsToggleReady  +
+                    "|TelegramToken="  + telegramTokenReady  +
                     "|TelegramChatId=" + telegramChatIdReady +
-                    "|TestButton=" + testButtonReady);
+                    "|TestButton="     + testButtonReady);
             }
             catch (Exception ex)
             {

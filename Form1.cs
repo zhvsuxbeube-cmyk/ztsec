@@ -2945,7 +2945,8 @@ namespace ZeroTrace_Security_Official
 
                 // A notification represents a new identified connection, not every
                 // telemetry refresh for an existing connection.
-                HandleNewConnectionNotification(nickname, tag, clientIp, country);
+                // userName is the Windows login name (GetUserNameW); nickname is the computer name.
+                HandleNewConnectionNotification(userName, tag, clientIp, country);
             }
 
             if (refreshDynamicTelemetry)

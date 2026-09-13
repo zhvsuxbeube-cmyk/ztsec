@@ -142,14 +142,14 @@
     <Reference Include="System.Security.Cryptography.Algorithms" />
     <Reference Include="System.Security.Cryptography.Encoding" />
     <Reference Include="System.Security.Cryptography.Primitives" />
-    <Reference Include="System.Security.Cryptography.X509Certificates" /><Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Security.Cryptography.X509Certificates" />
     <Reference Include="System.Data.DataSetExtensions" />
+    <Reference Include="System.Runtime.Serialization" />
     <Reference Include="Microsoft.CSharp" />
     <Reference Include="System.Data" />
     <Reference Include="System.Deployment" />
     <Reference Include="System.Drawing" />
     <Reference Include="System.Windows.Forms" />
-    <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
     <!-- Build-time reference pack so the .NET Framework 4.7.2 target is reproducible when a developer pack is absent. -->
@@ -168,6 +168,7 @@
     <Compile Include="Program.cs" />
     <Compile Include="UiTheme.cs" />
     <Compile Include="NotificationSettings.cs" />
+    <Compile Include="BlockedConnectionStore.cs" />
     <Compile Include="TelegramNotificationService.cs" />
     <Compile Include="Form1.Notifications.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />

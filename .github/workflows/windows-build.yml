@@ -180,6 +180,42 @@ jobs:
             if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
           }
 
+      - name: Validate JSON persistence and agent protocol
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $projectRoot = Join-Path $PWD $env:PROJECT_DIR
+          $settingsSource = Join-Path $projectRoot 'NotificationSettings.cs'
+          $blockedSource = Join-Path $projectRoot 'BlockedConnectionStore.cs'
+          $formSource = Join-Path $projectRoot 'Form1.cs'
+          $agentSource = Join-Path $projectRoot 'ztsec_agent.py'
+          $agentSourceText = Get-Content -LiteralPath $agentSource -Raw
+          $agentTests = Join-Path $projectRoot 'tests\test_ztsec_agent.py'
+
+          $settingsText = Get-Content -LiteralPath $settingsSource -Raw
+          $blockedText = Get-Content -LiteralPath $blockedSource -Raw
+          $formText = Get-Content -LiteralPath $formSource -Raw
+          if ($settingsText -notmatch 'DataContractJsonSerializer') { throw 'Notification settings must use DataContractJsonSerializer.' }
+          if ($settingsText -match 'XDocument|XElement|XmlDocument|XmlSerializer|System\.Xml|notifications\.xml') { throw 'Legacy XML notification persistence is still present.' }
+          if ($settingsText -notmatch 'notifications\.json') { throw 'Notification settings JSON path is missing.' }
+          if ($blockedText -notmatch 'DataContractJsonSerializer' -or $blockedText -notmatch 'blocked_connections\.json') { throw 'Blocked connection persistence must use the compact JSON store.' }
+          if ($blockedText -match 'XDocument|XElement|XmlDocument|XmlSerializer|System\.Xml') { throw 'Blocked connection persistence contains legacy XML APIs.' }
+          if ($formText -notmatch 'HELLO:FINGERPRINT:' -or $formText -notmatch 'BlockedConnectionStore') { throw 'Fingerprint handshake/blocking server flow is missing.' }
+          if ($formText -notmatch 'Fingerprint') { throw 'Fingerprint connection field is missing.' }
+
+          foreach ($command in @('SLEEP','HIBERNATE','RESTART','SHUTDOWN','CLOSE','RECONNECT','BLOCK')) {
+            if ($agentSourceText -notmatch [regex]::Escape($command)) { throw "Agent command is missing: $command" }
+          }
+
+          if (-not (Test-Path -LiteralPath $agentTests -PathType Leaf)) { throw 'Agent protocol tests are missing.' }
+          python -m py_compile $agentSource
+          if ($LASTEXITCODE -ne 0) { throw 'ztsec_agent.py syntax validation failed.' }
+          python $agentTests
+          if ($LASTEXITCODE -ne 0) { throw 'ztsec_agent.py protocol tests failed.' }
+
+          Write-Host 'JSON persistence and agent protocol validation: PASS'
+
       - name: Validate UI theme source of truth
         shell: pwsh
         working-directory: ${{ github.workspace }}
@@ -565,6 +601,15 @@ jobs:
           }
           if ($text -notmatch 'NotificationsPage: valid') {
             throw "Notifications page structure was not confirmed by CI UI validation. Diagnostics: $text"
+          }
+          if ($text -notmatch 'ServerLogsPage: valid') {
+            throw "Server Logs page structure was not confirmed by CI UI validation. Diagnostics: $text"
+          }
+          if ($text -notmatch 'BlockedConnectionsPage: valid') {
+            throw "Blocked Connections page structure was not confirmed by CI UI validation. Diagnostics: $text"
+          }
+          if ($text -notmatch 'HWID=visible' -or $text -notmatch 'Fingerprint=visible') {
+            throw "HWID/Fingerprint connection columns were not confirmed visible by CI UI validation. Diagnostics: $text"
           }
 
       - name: Capture actual application GUI screenshots

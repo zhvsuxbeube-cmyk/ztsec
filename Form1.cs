@@ -14,6 +14,7 @@ using System.Security;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using DevExpress.XtraGrid.Views.Grid;
 using DevExpress.XtraGrid.Views.Grid.ViewInfo;
@@ -45,13 +46,20 @@ namespace ZeroTrace_Security_Official
         // Connections navigation and context-menu state.
         private DevExpress.XtraTab.XtraTabPage autoTasksTabPage;
         private DevExpress.XtraTab.XtraTabPage notificationsTabPage;
+        private DevExpress.XtraTab.XtraTabPage serverLogsTabPage;
         private DevExpress.XtraBars.Navigation.AccordionControlElement autoTasksNavigationElement;
         private DevExpress.XtraBars.Navigation.AccordionControlElement notificationsNavigationElement;
+        private DevExpress.XtraBars.Navigation.AccordionControlElement serverLogsNavigationElement;
         private DevExpress.XtraBars.Navigation.AccordionControlElement pluginManagerNavigationElement;
         private DevExpress.XtraBars.Navigation.AccordionControlElement blockedConnectionsNavigationElement;
         private DevExpress.XtraBars.Navigation.AccordionControlElement systemNavigationGroup;
         private DevExpress.XtraTab.XtraTabPage pluginManagerTabPage;
         private DevExpress.XtraTab.XtraTabPage blockedConnectionsTabPage;
+        private DevExpress.XtraGrid.GridControl blockedConnectionsGrid;
+        private DevExpress.XtraGrid.Views.Grid.GridView blockedConnectionsGridView;
+        private DataTable blockedConnectionsTable;
+        private ContextMenuStrip blockedConnectionsContextMenu;
+        private System.Windows.Forms.RichTextBox serverLogsRichTextBox;
         private ContextMenuStrip connectionsContextMenu;
         private DevExpress.XtraBars.PopupMenu connectionsPopupMenu;
         private DevExpress.XtraBars.BarSubItem connectionsAdministrationMenu;
@@ -115,6 +123,8 @@ namespace ZeroTrace_Security_Official
         private readonly Dictionary<string, string> connectionRowIds = new Dictionary<string, string>();
         private readonly HashSet<string> selectedConnectionIds = new HashSet<string>(StringComparer.Ordinal);
         private readonly HashSet<string> pendingTelemetryRefreshes = new HashSet<string>(StringComparer.Ordinal);
+        private readonly BlockedConnectionStore blockedConnectionStore = new BlockedConnectionStore();
+        private readonly Dictionary<string, PendingCommand> pendingCommands = new Dictionary<string, PendingCommand>(StringComparer.Ordinal);
         private readonly Dictionary<string, long> telemetryRequestTicks = new Dictionary<string, long>();
         private DevExpress.XtraEditors.PanelControl connectionsLayoutHost;
         private DevExpress.XtraEditors.PanelControl connectionsSearchBar;
@@ -124,6 +134,13 @@ namespace ZeroTrace_Security_Official
         private DevExpress.XtraEditors.SimpleButton connectionsSearchCloseButton;
         private string connectionMouseDownSelectionId = string.Empty;
         private bool connectionMouseDownWasSelected;
+
+        private sealed class PendingCommand
+        {
+            public string ConnectionId { get; set; }
+            public string Command { get; set; }
+            public DateTime SentAtUtc { get; set; }
+        }
 
         // Class to track each server instance
         private class ServerInstance
@@ -142,13 +159,15 @@ namespace ZeroTrace_Security_Official
             {
                 switch (Type)
                 {
-                    case LogType.Error: return Color.Red;
-                    case LogType.Warning: return Color.Orange;
+                    case LogType.Error: return Color.FromArgb(235, 78, 78);
+                    case LogType.Warning: return Color.FromArgb(235, 196, 78);
                     case LogType.Info: return Color.White;
-                    case LogType.Connection: return SidebarAccentColor;
+                    case LogType.Success: return Color.FromArgb(89, 204, 126);
+                    case LogType.Connection: return Color.FromArgb(89, 204, 126);
                     case LogType.DataTransfer: return SidebarAccentColor;
-                    case LogType.Security: return Color.Yellow;
-                    default: return Color.Gray;
+                    case LogType.Security: return Color.FromArgb(235, 196, 78);
+                    case LogType.System: return Color.White;
+                    default: return Color.White;
                 }
             }
         }
@@ -158,6 +177,7 @@ namespace ZeroTrace_Security_Official
         public enum LogType
         {
             Info,
+            Success,
             Warning,
             Error,
             Connection,
@@ -197,6 +217,8 @@ namespace ZeroTrace_Security_Official
 
             InitializeAdditionalNavigationPages();
             InitializeNotificationsPage();
+            InitializeServerLogsPage();
+            InitializeBlockedConnectionsPage();
             this.FormClosing += delegate
             {
                 SaveNotificationSettingsOnClose();
@@ -970,27 +992,22 @@ namespace ZeroTrace_Security_Official
 
         private void InitializeLogging()
         {
-            // Setup the rich text box
             richTextBox1.BackColor = Color.Black;
             richTextBox1.ForeColor = Color.White;
             richTextBox1.Font = new Font("Consolas", 9F, FontStyle.Regular);
             richTextBox1.ReadOnly = true;
 
-            // Setup timer for batch processing logs (more efficient than updating on every log)
             logUpdateTimer = new System.Windows.Forms.Timer();
-            logUpdateTimer.Interval = 500; // Update every half second
+            logUpdateTimer.Interval = 500;
             logUpdateTimer.Tick += ProcessLogQueue;
             logUpdateTimer.Start();
 
-            // Write initial message
-            LogToMonitor("Traffic monitoring initialized", LogType.System);
-            LogToMonitor("Server ready. Click 'Start Listening' to begin.", LogType.Info);
+            AppendServerSettingsLog("Server settings ready", LogType.System);
+            AppendServerSettingsLog("Port listening status is shown here", LogType.Info);
         }
-
 
         public void LogToMonitor(string message, LogType type)
         {
-            // Add to queue instead of directly updating UI
             logQueue.Enqueue(new LogEntry
             {
                 Timestamp = DateTime.Now,
@@ -998,75 +1015,87 @@ namespace ZeroTrace_Security_Official
                 Type = type
             });
 
-            // Don't let the queue grow too large
             if (logQueue.Count > maxLogEntries * 2)
             {
-                // Emergency cleanup if queue gets too big
                 LogEntry dummy;
                 while (logQueue.Count > maxLogEntries && logQueue.TryDequeue(out dummy))
                 {
-                    // Just removing excess entries
                 }
             }
         }
 
+        private void LogServerEvent(string message, LogType type)
+        {
+            LogToMonitor(message, type);
+        }
+
+        private void AppendServerSettingsLog(string message, LogType type)
+        {
+            if (richTextBox1 == null)
+                return;
+
+            string formatted = "[" + DateTime.Now.ToString("HH:mm:ss.fff") + "] " + message + Environment.NewLine;
+            int startIndex = richTextBox1.TextLength;
+            richTextBox1.AppendText(formatted);
+            richTextBox1.Select(startIndex, formatted.Length);
+            richTextBox1.SelectionColor = type == LogType.Error ? Color.FromArgb(235, 78, 78) :
+                (type == LogType.Warning ? Color.FromArgb(235, 196, 78) : Color.White);
+            richTextBox1.SelectionLength = 0;
+            richTextBox1.SelectionStart = richTextBox1.TextLength;
+            richTextBox1.ScrollToCaret();
+        }
 
         private void ProcessLogQueue(object sender, EventArgs e)
         {
-            if (logQueue.IsEmpty)
+            if (logQueue.IsEmpty || serverLogsRichTextBox == null)
                 return;
 
-            // Check if we need to trim the text in the rich text box
-            if (richTextBox1.Lines.Length > maxLogEntries)
+            if (serverLogsRichTextBox.Lines.Length > maxLogEntries)
             {
-                richTextBox1.SuspendLayout();
-                int cutoff = richTextBox1.GetFirstCharIndexFromLine(richTextBox1.Lines.Length - maxLogEntries);
-                richTextBox1.Select(0, cutoff);
-                richTextBox1.SelectedText = "";
-                richTextBox1.ResumeLayout();
+                serverLogsRichTextBox.SuspendLayout();
+                int cutoff = serverLogsRichTextBox.GetFirstCharIndexFromLine(
+                    serverLogsRichTextBox.Lines.Length - maxLogEntries);
+                if (cutoff > 0)
+                {
+                    serverLogsRichTextBox.Select(0, cutoff);
+                    serverLogsRichTextBox.SelectedText = "";
+                }
+                serverLogsRichTextBox.ResumeLayout();
             }
 
-            // Process up to 100 logs at a time to prevent UI freeze
             int processCount = Math.Min(100, logQueue.Count);
             if (processCount == 0)
                 return;
 
-            // Build a batch of log entries for efficiency
-            richTextBox1.SuspendLayout();
-            bool wasAtBottom = IsRichTextBoxScrolledToBottom();
-
-            StringBuilder batch = new StringBuilder();
+            serverLogsRichTextBox.SuspendLayout();
+            bool wasAtBottom = IsServerLogsScrolledToBottom();
             for (int i = 0; i < processCount; i++)
             {
-                if (logQueue.TryDequeue(out LogEntry entry))
-                {
-                    // Format: [Time] Message
-                    string timestamp = entry.Timestamp.ToString("HH:mm:ss.fff");
-                    string formatted = $"[{timestamp}] {entry.Message}\n";
+                LogEntry entry;
+                if (!logQueue.TryDequeue(out entry))
+                    break;
 
-                    // Append to rich text box with color
-                    int startIndex = richTextBox1.TextLength;
-                    richTextBox1.AppendText(formatted);
-                    richTextBox1.Select(startIndex, formatted.Length);
-                    richTextBox1.SelectionColor = entry.GetColor();
-                    richTextBox1.SelectionLength = 0; // Deselect
-                }
+                string formatted = "[" + entry.Timestamp.ToString("HH:mm:ss.fff") + "] " +
+                                   entry.Message + Environment.NewLine;
+                int startIndex = serverLogsRichTextBox.TextLength;
+                serverLogsRichTextBox.AppendText(formatted);
+                serverLogsRichTextBox.Select(startIndex, formatted.Length);
+                serverLogsRichTextBox.SelectionColor = entry.GetColor();
+                serverLogsRichTextBox.SelectionLength = 0;
             }
 
-            // Auto-scroll if was at bottom before
             if (wasAtBottom && autoScroll)
             {
-                richTextBox1.SelectionStart = richTextBox1.Text.Length;
-                richTextBox1.ScrollToCaret();
+                serverLogsRichTextBox.SelectionStart = serverLogsRichTextBox.Text.Length;
+                serverLogsRichTextBox.ScrollToCaret();
             }
-
-            richTextBox1.ResumeLayout();
+            serverLogsRichTextBox.ResumeLayout();
         }
 
-        private bool IsRichTextBoxScrolledToBottom()
+        private bool IsServerLogsScrolledToBottom()
         {
-            // No need for complex calculations, just use a simple approximation
-            return richTextBox1.SelectionStart >= richTextBox1.Text.Length - 10;
+            return serverLogsRichTextBox == null ||
+                   serverLogsRichTextBox.SelectionStart >= serverLogsRichTextBox.Text.Length - 10;
         }
 
         private void Form1_Load(object sender, EventArgs e)
@@ -1350,7 +1379,7 @@ namespace ZeroTrace_Security_Official
                 HideConnectionsSearch();
                 bool collapsedStateValid = connectionsSearchButton.Visible && !connectionsSearchEditorHost.Visible;
 
-                string[] requiredColumns = { "IP", "UserName", "GPU", "Ping" };
+                string[] requiredColumns = { "IP", "UserName", "GPU", "Ping", "HWID", "Fingerprint" };
                 bool requiredColumnsVisible = requiredColumns.All(name => gridView.Columns[name] != null && gridView.Columns[name].Visible);
                 bool connectionRowsValid = clientsTable.Rows.Count >= 2 &&
                     requiredColumns.All(name => { var value = Convert.ToString(clientsTable.Rows[0][name]); return !string.IsNullOrWhiteSpace(value); });
@@ -1372,6 +1401,13 @@ namespace ZeroTrace_Security_Official
                 int currentDpi = GetCurrentDpi();
                 int expectedSidebarDeviceWidth = ScaleLogicalPixels(SidebarWidth, currentDpi);
                 bool sidebarWidthValid = accordionControl1.Width == expectedSidebarDeviceWidth;
+                bool serverLogsPageStructureValid =
+                    serverLogsTabPage != null && serverLogsRichTextBox != null &&
+                    serverLogsTabPage.Controls.Contains(serverLogsRichTextBox);
+                bool blockedConnectionsPageStructureValid =
+                    blockedConnectionsTabPage != null && blockedConnectionsGrid != null &&
+                    blockedConnectionsGridView != null && blockedConnectionsTable != null &&
+                    blockedConnectionsTabPage.Controls.Contains(blockedConnectionsGrid);
                 bool notificationsPageStructureValid =
                     notificationsTabPage != null &&
                     notificationsPageRoot != null &&
@@ -1384,7 +1420,7 @@ namespace ZeroTrace_Security_Official
 
                 using (StreamWriter writer = new StreamWriter(validationPath, false))
                 {
-                    writer.WriteLine("STATUS: " + (hierarchyValid && regionsDoNotOverlap && expandedWidthValid && collapsedStateValid && requiredColumnsVisible && connectionRowsValid && sidebarWidthValid && notificationsPageStructureValid && SidebarAccentColor.ToArgb() == UiTheme.AccentColor.ToArgb() && selectedAccentProbeReady ? "PASS" : "FAIL"));
+                    writer.WriteLine("STATUS: " + (hierarchyValid && regionsDoNotOverlap && expandedWidthValid && collapsedStateValid && requiredColumnsVisible && connectionRowsValid && sidebarWidthValid && notificationsPageStructureValid && serverLogsPageStructureValid && blockedConnectionsPageStructureValid && SidebarAccentColor.ToArgb() == UiTheme.AccentColor.ToArgb() && selectedAccentProbeReady ? "PASS" : "FAIL"));
                     writer.WriteLine("Hierarchy: " + (hierarchyValid ? "valid" : "invalid"));
                     writer.WriteLine("SearchBarBounds: " + connectionsSearchBar.Bounds);
                     writer.WriteLine("GridBounds: " + gridControl1.Bounds);
@@ -1402,11 +1438,15 @@ namespace ZeroTrace_Security_Official
                     writer.WriteLine("AccentColorMatchesSharedToken: " + (SidebarAccentColor.ToArgb() == UiTheme.AccentColor.ToArgb() ? "yes" : "no"));
                     writer.WriteLine("SelectedAccentProbeReady: " + (selectedAccentProbeReady ? "yes" : "no"));
                     writer.WriteLine("NotificationsPage: " + (notificationsPageStructureValid ? "valid" : "invalid"));
+                    writer.WriteLine("ServerLogsPage: " + (serverLogsPageStructureValid ? "valid" : "invalid"));
+                    writer.WriteLine("BlockedConnectionsPage: " + (blockedConnectionsPageStructureValid ? "valid" : "invalid"));
                     writer.WriteLine("ConnectionRows: " + clientsTable.Rows.Count);
                     writer.WriteLine("IP=" + (gridView.Columns["IP"].Visible ? "visible" : "hidden"));
                     writer.WriteLine("UserName=" + (gridView.Columns["UserName"].Visible ? "visible" : "hidden"));
                     writer.WriteLine("GPU=" + (gridView.Columns["GPU"].Visible ? "visible" : "hidden"));
                     writer.WriteLine("Ping=" + (gridView.Columns["Ping"].Visible ? "visible" : "hidden"));
+                    writer.WriteLine("HWID=" + (gridView.Columns["HWID"].Visible ? "visible" : "hidden"));
+                    writer.WriteLine("Fingerprint=" + (gridView.Columns["Fingerprint"].Visible ? "visible" : "hidden"));
                 }
             }
             catch (Exception ex)
@@ -1459,6 +1499,7 @@ namespace ZeroTrace_Security_Official
             clientsTable.Columns.Add("AFKTime", typeof(string));
             clientsTable.Columns.Add("Ping", typeof(string));
             clientsTable.Columns.Add("HWID", typeof(string));
+            clientsTable.Columns.Add("Fingerprint", typeof(string));
             clientsTable.Columns.Add("ConnectionId", typeof(string));
 
             gridControl1.DataSource = clientsTable;
@@ -1514,6 +1555,7 @@ namespace ZeroTrace_Security_Official
             gridView.Columns["AFKTime"].Caption = "AFK Time";
             gridView.Columns["Ping"].Caption = "Ping";
             gridView.Columns["HWID"].Caption = "HWID";
+            gridView.Columns["Fingerprint"].Caption = "Fingerprint";
 
             gridView.Columns["IP"].Width = 120;
             gridView.Columns["Country"].Width = 100;
@@ -1531,6 +1573,7 @@ namespace ZeroTrace_Security_Official
             gridView.Columns["AFKTime"].Width = 110;
             gridView.Columns["Ping"].Width = 85;
             gridView.Columns["HWID"].Width = 260;
+            gridView.Columns["Fingerprint"].Width = 330;
             gridView.Columns["ConnectionId"].Visible = false;
 
             // Keep the connection identity and health fields in the initial viewport.
@@ -1540,7 +1583,7 @@ namespace ZeroTrace_Security_Official
             string[] priorityColumns = {
                 "IP", "Country", "UserName", "Tag", "Nickname", "Version",
                 "Privileges", "OS", "GPU", "CPU", "RAM", "AntiVirus",
-                "Uptime", "AFKTime", "Ping", "HWID"
+                "Uptime", "AFKTime", "Ping", "HWID", "Fingerprint"
             };
             for (int index = 0; index < priorityColumns.Length; index++)
                 gridView.Columns[priorityColumns[index]].VisibleIndex = index;
@@ -2558,7 +2601,7 @@ namespace ZeroTrace_Security_Official
             {
                 if (isServerRunning)
                 {
-                    LogToMonitor($"Server is already running.", LogType.Warning);
+                    LogServerEvent("Start request ignored: listener already running", LogType.Warning);
                     return;
                 }
 
@@ -2568,8 +2611,8 @@ namespace ZeroTrace_Security_Official
                 tcpServer = listener;
                 isServerRunning = true;
 
-                LogToMonitor($"Server started successfully on port {port}", LogType.System);
-                LogToMonitor("Waiting for client connections...", LogType.Info);
+                AppendServerSettingsLog("Server listening on port " + port, LogType.Success);
+                AppendServerSettingsLog("Listening for connections", LogType.Info);
 
                 serverThread = new Thread(() => RunServer(port))
                 {
@@ -2581,7 +2624,7 @@ namespace ZeroTrace_Security_Official
             {
                 isServerRunning = false;
                 tcpServer = null;
-                LogToMonitor($"Unable to listen on port {port}: {ex.Message}", LogType.Error);
+                AppendServerSettingsLog("Port listen failed: " + ex.Message, LogType.Error);
                 MessageBox.Show($"Unable to listen on port {port}: {ex.Message}",
                     "Server Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
@@ -2589,7 +2632,7 @@ namespace ZeroTrace_Security_Official
             {
                 isServerRunning = false;
                 tcpServer = null;
-                LogToMonitor($"Error starting server: {ex.Message}", LogType.Error);
+                AppendServerSettingsLog("Port listen failed: " + ex.Message, LogType.Error);
                 MessageBox.Show($"Error starting server: {ex.Message}",
                     "Server Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
@@ -2620,7 +2663,7 @@ namespace ZeroTrace_Security_Official
             }
             catch (Exception ex)
             {
-                LogToMonitor($"Error stopping server: {ex.Message}", LogType.Error);
+                AppendServerSettingsLog("Port stop failed: " + ex.Message, LogType.Error);
             }
         }
         private void RunServer(int port)
@@ -2658,11 +2701,11 @@ namespace ZeroTrace_Security_Official
             }
             catch (SocketException ex)
             {
-                LogToMonitor($"Server error on port {port}: {ex.Message}", LogType.Error);
+                LogServerEvent("Server error: " + ex.Message, LogType.Error);
             }
             catch (Exception ex)
             {
-                LogToMonitor($"Server error: {ex.Message}", LogType.Error);
+                LogServerEvent("Server error: " + ex.Message, LogType.Error);
             }
             finally
             {
@@ -2677,7 +2720,7 @@ namespace ZeroTrace_Security_Official
                 {
                 }
 
-                LogToMonitor("Server stopped", LogType.System);
+                AppendServerSettingsLog("Port listener stopped", LogType.Success);
             }
         }
 
@@ -2689,23 +2732,46 @@ namespace ZeroTrace_Security_Official
             NetworkStream stream = null;
             bool telemetrySeen = false;
             bool remoteDisconnected = false;
+            string fingerprint = string.Empty;
 
             try
             {
                 if (tcpClient.Client.RemoteEndPoint is System.Net.IPEndPoint endpoint)
                     clientIp = endpoint.Address.ToString();
 
-                lock (connectionStateLock)
-                {
-                    connectedClients[connectionId] = tcpClient;
-                }
-
                 stream = tcpClient.GetStream();
+                stream.ReadTimeout = 5000;
 
                 using (var reader = new System.IO.StreamReader(
                     stream, Encoding.UTF8, false, 4096, true))
                 {
-                    string line;
+                    string line = reader.ReadLine();
+                    if (line == null || !line.StartsWith("HELLO:FINGERPRINT:", StringComparison.Ordinal))
+                    {
+                        LogServerEvent("Connection rejected: fingerprint handshake missing", LogType.Warning);
+                        return;
+                    }
+
+                    fingerprint = BlockedConnectionStore.NormalizeFingerprint(line.Substring("HELLO:FINGERPRINT:".Length));
+                    if (fingerprint.Length == 0)
+                    {
+                        LogServerEvent("Connection rejected: invalid fingerprint", LogType.Error);
+                        return;
+                    }
+
+                    if (blockedConnectionStore.Contains(fingerprint))
+                    {
+                        LogServerEvent("Blocked connection rejected: " + fingerprint, LogType.Warning);
+                        return;
+                    }
+
+                    lock (connectionStateLock)
+                    {
+                        connectedClients[connectionId] = tcpClient;
+                    }
+
+                    stream.ReadTimeout = 0;
+                    line = null;
                     // Do not use TcpClient.Connected here. It is not an authoritative
                     // live-state check; EOF or a socket exception is the actual signal.
                     while (isServerRunning && (line = reader.ReadLine()) != null)
@@ -2715,11 +2781,11 @@ namespace ZeroTrace_Security_Official
 
                         if (line.StartsWith("DATA:", StringComparison.Ordinal))
                         {
-                            if (ParseClientDataAndAddToGrid(connectionId, clientIp, line.Substring(5))
+                            if (ParseClientDataAndAddToGrid(connectionId, clientIp, fingerprint, line.Substring(5))
                                 && !telemetrySeen)
                             {
                                 telemetrySeen = true;
-                                LogToMonitor($"Client connected: {clientIp}", LogType.Connection);
+                                LogServerEvent("Client connected: " + clientIp, LogType.Connection);
                             }
                         }
                         else if (string.Equals(line, "HB", StringComparison.Ordinal))
@@ -2729,6 +2795,16 @@ namespace ZeroTrace_Security_Official
                         else if (string.Equals(line, "PONG", StringComparison.Ordinal))
                         {
                             UpdateConnectionPing(connectionId);
+                        }
+                        else if (line.StartsWith("ACK:", StringComparison.Ordinal))
+                        {
+                            string command = line.Substring(4).Trim().ToUpperInvariant();
+                            CompletePendingCommand(connectionId, command, true);
+                        }
+                        else if (line.StartsWith("ERR:", StringComparison.Ordinal))
+                        {
+                            string command = line.Substring(4).Trim().ToUpperInvariant();
+                            CompletePendingCommand(connectionId, command, false);
                         }
                         else
                         {
@@ -2758,7 +2834,7 @@ namespace ZeroTrace_Security_Official
                 if (isServerRunning)
                 {
                     remoteDisconnected = true;
-                    LogToMonitor($"Error handling client {clientIp}: {ex.Message}", LogType.Error);
+                    LogServerEvent("Client handling failed: " + ex.Message, LogType.Error);
                 }
             }
             finally
@@ -2771,6 +2847,7 @@ namespace ZeroTrace_Security_Official
                 }
 
                 selectedConnectionIds.Remove(connectionId);
+                ReportPendingCommandsOnDisconnect(connectionId);
                 lock (connectionStateLock)
                 {
                     pendingTelemetryRefreshes.Remove(connectionId);
@@ -2795,7 +2872,7 @@ namespace ZeroTrace_Security_Official
                 }
 
                 if (telemetrySeen && remoteDisconnected && isServerRunning)
-                    LogToMonitor($"Client disconnected: {clientIp}", LogType.Connection);
+                    LogServerEvent("Client disconnected: " + clientIp, LogType.Warning);
             }
         }
 
@@ -2889,13 +2966,14 @@ namespace ZeroTrace_Security_Official
             string uptime,
             string afkTime,
             string ping,
-            string hwid)
+            string hwid,
+            string fingerprint)
         {
             if (InvokeRequired)
             {
                 Invoke(new Action(() => UpsertConnectionRow(
                     connectionId, clientIp, country, nickname, tag, userName, version,
-                    privileges, osName, gpu, cpu, ram, antivirus, uptime, afkTime, ping, hwid)));
+                    privileges, osName, gpu, cpu, ram, antivirus, uptime, afkTime, ping, hwid, fingerprint)));
                 return;
             }
 
@@ -2942,6 +3020,7 @@ namespace ZeroTrace_Security_Official
                 row["CPU"] = cpu;
                 row["AntiVirus"] = antivirus;
                 row["HWID"] = hwid;
+                row["Fingerprint"] = fingerprint;
 
                 // A notification represents a new identified connection, not every
                 // telemetry refresh for an existing connection.
@@ -2997,14 +3076,14 @@ namespace ZeroTrace_Security_Official
             UpdateClientCount();
         }
 
-        private bool ParseClientDataAndAddToGrid(string connectionId, string clientIp, string data)
+        private bool ParseClientDataAndAddToGrid(string connectionId, string clientIp, string fingerprint, string data)
         {
             try
             {
                 string[] parts = data.Split('|');
-                if (parts.Length < 15)
+                if (parts.Length < 16)
                 {
-                    LogToMonitor($"Ignoring incomplete telemetry from {clientIp}: expected 15 fields, received {parts.Length}.", LogType.Warning);
+                    LogServerEvent("Telemetry rejected: incomplete payload", LogType.Warning);
                     return false;
                 }
 
@@ -3023,6 +3102,13 @@ namespace ZeroTrace_Security_Official
                 string afkTime = parts[12];
                 string ping = parts[13];
                 string hwid = parts[14];
+                string payloadFingerprint = BlockedConnectionStore.NormalizeFingerprint(parts[15]);
+                string handshakeFingerprint = BlockedConnectionStore.NormalizeFingerprint(fingerprint);
+                if (payloadFingerprint.Length == 0 || !string.Equals(payloadFingerprint, handshakeFingerprint, StringComparison.OrdinalIgnoreCase))
+                {
+                    LogServerEvent("Telemetry rejected: fingerprint mismatch", LogType.Error);
+                    return false;
+                }
 
                 UpsertConnectionRow(
                     connectionId, clientIp,
@@ -3040,14 +3126,15 @@ namespace ZeroTrace_Security_Official
                     string.IsNullOrWhiteSpace(uptime) ? "Unknown" : uptime,
                     string.IsNullOrWhiteSpace(afkTime) ? "Unknown" : afkTime,
                     string.IsNullOrWhiteSpace(ping) ? "Unknown" : ping,
-                    string.IsNullOrWhiteSpace(hwid) ? "Unknown" : hwid);
+                    string.IsNullOrWhiteSpace(hwid) ? "Unknown" : hwid,
+                    payloadFingerprint);
 
                 UpdateClientCount();
                 return true;
             }
             catch (Exception ex)
             {
-                LogToMonitor($"Error parsing telemetry from {clientIp}: {ex.Message}", LogType.Error);
+                LogServerEvent("Telemetry parsing failed: " + ex.Message, LogType.Error);
                 return false;
             }
         }
@@ -3116,7 +3203,7 @@ namespace ZeroTrace_Security_Official
 
                 // Clear log before starting server
                 richTextBox1.Clear();
-                LogToMonitor($"Starting server on port {port}...", LogType.System);
+                AppendServerSettingsLog("Starting listener on port " + port, LogType.Info);
 
                 // Start server with the specified port
                 StartServer(port);
@@ -3134,7 +3221,7 @@ namespace ZeroTrace_Security_Official
             }
             catch (Exception ex)
             {
-                LogToMonitor($"Error starting server: {ex.Message}", LogType.Error);
+                AppendServerSettingsLog("Port listen failed: " + ex.Message, LogType.Error);
                 MessageBox.Show("Error starting server: " + ex.Message);
             }
         }
@@ -3150,7 +3237,7 @@ namespace ZeroTrace_Security_Official
     
     try
     {
-        LogToMonitor("Stopping server...", LogType.System);
+        AppendServerSettingsLog("Stopping port listener", LogType.Info);
         StopServer();
               
 
@@ -3159,12 +3246,12 @@ namespace ZeroTrace_Security_Official
         simpleButton2.Enabled = false;
         textEdit1.Enabled = true;
         
-        LogToMonitor("Server stopped", LogType.System);
+        AppendServerSettingsLog("Port listener stopped", LogType.Success);
                 label45.Text = "0";
             }
     catch (Exception ex)
     {
-        LogToMonitor($"Error stopping server: {ex.Message}", LogType.Error);
+        AppendServerSettingsLog("Port stop failed: " + ex.Message, LogType.Error);
         MessageBox.Show("Error stopping server: " + ex.Message);
     }
         }
@@ -3993,11 +4080,14 @@ namespace ZeroTrace_Security_Official
             notificationsTabPage.Text = "Notifications";
             notificationsTabPage.BackColor = ColorTranslator.FromHtml("#262626");
 
+            serverLogsTabPage = CreateBlankNavigationPage("serverLogsTabPage", "Server Logs");
+
             pluginManagerTabPage = CreateBlankNavigationPage("pluginManagerTabPage", "Plugin Manager");
             blockedConnectionsTabPage = CreateBlankNavigationPage("blockedConnectionsTabPage", "Blocked Connections");
 
             xtraTabControl1.TabPages.Add(autoTasksTabPage);
             xtraTabControl1.TabPages.Add(notificationsTabPage);
+            xtraTabControl1.TabPages.Add(serverLogsTabPage);
             xtraTabControl1.TabPages.Add(pluginManagerTabPage);
             xtraTabControl1.TabPages.Add(blockedConnectionsTabPage);
 
@@ -4006,6 +4096,9 @@ namespace ZeroTrace_Security_Official
 
             notificationsNavigationElement = CreateNavigationItem("notificationsNavigationElement", "Notifications");
             notificationsNavigationElement.Click += notificationsNavigationElement_Click;
+
+            serverLogsNavigationElement = CreateNavigationItem("serverLogsNavigationElement", "Server Logs");
+            serverLogsNavigationElement.Click += delegate { NavigateToSidebarPage(serverLogsNavigationElement, serverLogsTabPage); };
 
             pluginManagerNavigationElement = CreateNavigationItem("pluginManagerNavigationElement", "Plugin Manager");
             pluginManagerNavigationElement.Click += delegate { NavigateToSidebarPage(pluginManagerNavigationElement, pluginManagerTabPage); };
@@ -4018,6 +4111,7 @@ namespace ZeroTrace_Security_Official
             systemNavigationGroup.Expanded = true;
             systemNavigationGroup.Elements.Clear();
             systemNavigationGroup.Elements.Add(notificationsNavigationElement);
+            systemNavigationGroup.Elements.Add(serverLogsNavigationElement);
             systemNavigationGroup.Elements.Add(pluginManagerNavigationElement);
 
             accordionControlElement1.Elements.Add(blockedConnectionsNavigationElement);
@@ -4034,6 +4128,327 @@ namespace ZeroTrace_Security_Official
             page.Text = text;
             page.BackColor = ColorTranslator.FromHtml("#262626");
             return page;
+        }
+
+        private void InitializeServerLogsPage()
+        {
+            serverLogsTabPage.Text = "Server Logs";
+            serverLogsTabPage.BackColor = ColorTranslator.FromHtml("#262626");
+
+            Panel header = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 74,
+                BackColor = Color.FromArgb(38, 38, 38),
+                Padding = new Padding(24, 16, 24, 8)
+            };
+            Label title = new Label
+            {
+                Text = "Server Logs",
+                AutoSize = true,
+                ForeColor = Color.White,
+                Font = new Font("Segoe UI Semibold", 15F, FontStyle.Bold),
+                Location = new Point(24, 12)
+            };
+            Label hint = new Label
+            {
+                Text = "Connection and command events",
+                AutoSize = true,
+                ForeColor = Color.FromArgb(160, 166, 165),
+                Font = new Font("Segoe UI", 8.5F),
+                Location = new Point(25, 40)
+            };
+            header.Controls.Add(title);
+            header.Controls.Add(hint);
+
+            serverLogsRichTextBox = new RichTextBox
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.FromArgb(20, 20, 20),
+                ForeColor = Color.White,
+                BorderStyle = BorderStyle.None,
+                ReadOnly = true,
+                Font = new Font("Consolas", 9F),
+                DetectUrls = false,
+                ScrollBars = RichTextBoxScrollBars.ForcedVertical,
+                Margin = new Padding(18),
+                Name = "serverLogsRichTextBox"
+            };
+            serverLogsTabPage.Controls.Add(serverLogsRichTextBox);
+            serverLogsTabPage.Controls.Add(header);
+        }
+
+        private void InitializeBlockedConnectionsPage()
+        {
+            blockedConnectionsTabPage.Text = "Blocked Connections";
+            blockedConnectionsTabPage.BackColor = ColorTranslator.FromHtml("#262626");
+
+            Panel header = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 74,
+                BackColor = Color.FromArgb(38, 38, 38),
+                Padding = new Padding(24, 16, 24, 8)
+            };
+            Label title = new Label
+            {
+                Text = "Blocked Connections",
+                AutoSize = true,
+                ForeColor = Color.White,
+                Font = new Font("Segoe UI Semibold", 15F, FontStyle.Bold),
+                Location = new Point(24, 12)
+            };
+            Label hint = new Label
+            {
+                Text = "Fingerprint-based access control",
+                AutoSize = true,
+                ForeColor = Color.FromArgb(160, 166, 165),
+                Font = new Font("Segoe UI", 8.5F),
+                Location = new Point(25, 40)
+            };
+            header.Controls.Add(title);
+            header.Controls.Add(hint);
+
+            blockedConnectionsGrid = new DevExpress.XtraGrid.GridControl
+            {
+                Dock = DockStyle.Fill,
+                Name = "blockedConnectionsGrid"
+            };
+            blockedConnectionsGridView = new DevExpress.XtraGrid.Views.Grid.GridView(blockedConnectionsGrid);
+            blockedConnectionsGrid.MainView = blockedConnectionsGridView;
+            blockedConnectionsGrid.ViewCollection.Add(blockedConnectionsGridView);
+            blockedConnectionsGridView.OptionsBehavior.Editable = false;
+            blockedConnectionsGridView.OptionsSelection.EnableAppearanceFocusedCell = false;
+            blockedConnectionsGridView.OptionsSelection.EnableAppearanceFocusedRow = true;
+            blockedConnectionsGridView.OptionsView.ShowGroupPanel = false;
+            blockedConnectionsGridView.OptionsView.ColumnAutoWidth = false;
+            blockedConnectionsGridView.RowStyle += delegate(object sender, DevExpress.XtraGrid.Views.Grid.RowStyleEventArgs e)
+            {
+                if (e.RowHandle >= 0 && blockedConnectionsGridView.IsRowSelected(e.RowHandle))
+                {
+                    e.Appearance.BackColor = ColorTranslator.FromHtml("#1A2028");
+                    e.Appearance.ForeColor = Color.White;
+                    e.HighPriority = true;
+                }
+            };
+
+            blockedConnectionsTable = new DataTable("BlockedConnections");
+            blockedConnectionsTable.Columns.Add("IP", typeof(string));
+            blockedConnectionsTable.Columns.Add("UserName", typeof(string));
+            blockedConnectionsTable.Columns.Add("Fingerprint", typeof(string));
+            blockedConnectionsGrid.DataSource = blockedConnectionsTable;
+
+            blockedConnectionsContextMenu = new ContextMenuStrip
+            {
+                Name = "blockedConnectionsContextMenu",
+                ShowImageMargin = false,
+                ShowCheckMargin = false,
+                BackColor = Color.FromArgb(26, 26, 26),
+                ForeColor = Color.White,
+                Font = new Font("Segoe UI", 9F)
+            };
+            ToolStripMenuItem addItem = new ToolStripMenuItem("Add");
+            ToolStripMenuItem removeItem = new ToolStripMenuItem("Remove");
+            addItem.Click += delegate { ShowAddBlockedFingerprintDialog(); };
+            removeItem.Click += delegate { RemoveSelectedBlockedConnection(); };
+            blockedConnectionsContextMenu.Items.Add(addItem);
+            blockedConnectionsContextMenu.Items.Add(removeItem);
+            blockedConnectionsGrid.ContextMenuStrip = blockedConnectionsContextMenu;
+            blockedConnectionsGrid.MouseDown += BlockedConnectionsGrid_MouseDown;
+
+            blockedConnectionsTabPage.Controls.Add(blockedConnectionsGrid);
+            blockedConnectionsTabPage.Controls.Add(header);
+            ReloadBlockedConnectionsGrid();
+        }
+
+        private void BlockedConnectionsGrid_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Right || blockedConnectionsGridView == null)
+                return;
+
+            DevExpress.XtraGrid.Views.Grid.ViewInfo.GridHitInfo hit =
+                blockedConnectionsGridView.CalcHitInfo(e.Location);
+            if (hit.InRow && hit.RowHandle >= 0 && !blockedConnectionsGridView.IsRowSelected(hit.RowHandle))
+            {
+                blockedConnectionsGridView.ClearSelection();
+                blockedConnectionsGridView.SelectRow(hit.RowHandle);
+                blockedConnectionsGridView.FocusedRowHandle = hit.RowHandle;
+            }
+        }
+
+        private void ReloadBlockedConnectionsGrid()
+        {
+            if (blockedConnectionsTable == null)
+                return;
+
+            blockedConnectionsTable.Rows.Clear();
+            foreach (BlockedConnectionRecord record in blockedConnectionStore.GetAll())
+            {
+                DataRow row = blockedConnectionsTable.NewRow();
+                row["IP"] = record.Ip;
+                row["UserName"] = record.UserName;
+                row["Fingerprint"] = record.Fingerprint;
+                blockedConnectionsTable.Rows.Add(row);
+            }
+
+            if (blockedConnectionsGridView != null)
+            {
+                if (blockedConnectionsGridView.Columns["IP"] != null)
+                {
+                    blockedConnectionsGridView.Columns["IP"].Caption = "IP Address";
+                    blockedConnectionsGridView.Columns["IP"].Width = 140;
+                }
+                if (blockedConnectionsGridView.Columns["UserName"] != null)
+                {
+                    blockedConnectionsGridView.Columns["UserName"].Caption = "User Name";
+                    blockedConnectionsGridView.Columns["UserName"].Width = 180;
+                }
+                if (blockedConnectionsGridView.Columns["Fingerprint"] != null)
+                {
+                    blockedConnectionsGridView.Columns["Fingerprint"].Caption = "Fingerprint";
+                    blockedConnectionsGridView.Columns["Fingerprint"].Width = 360;
+                }
+            }
+        }
+
+        private void ShowAddBlockedFingerprintDialog()
+        {
+            const int width = 480;
+            const int height = 188;
+            using (Form dialog = new Form())
+            {
+                dialog.Text = "Add Blocked Connection";
+                dialog.StartPosition = FormStartPosition.CenterParent;
+                dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dialog.MinimizeBox = false;
+                dialog.MaximizeBox = false;
+                dialog.ShowInTaskbar = false;
+                dialog.ClientSize = new Size(width, height);
+                dialog.BackColor = Color.FromArgb(35, 37, 38);
+                dialog.ForeColor = Color.White;
+                dialog.Font = new Font("Segoe UI", 9F);
+
+                Label label = new Label
+                {
+                    Text = "Fingerprint",
+                    AutoSize = true,
+                    ForeColor = Color.FromArgb(239, 242, 241),
+                    Location = new Point(24, 24)
+                };
+                DevExpress.XtraEditors.TextEdit input = new DevExpress.XtraEditors.TextEdit
+                {
+                    Name = "blockedFingerprintInput",
+                    Location = new Point(24, 52),
+                    Size = new Size(432, 30),
+                    Properties = { NullValuePrompt = "Input a fingerprint to block", NullValuePromptShowForEmptyValue = true },
+                    BackColor = Color.FromArgb(31, 33, 34),
+                    ForeColor = Color.White
+                };
+                Button cancel = new Button
+                {
+                    Text = "Cancel",
+                    DialogResult = DialogResult.Cancel,
+                    FlatStyle = FlatStyle.Flat,
+                    Location = new Point(265, 112),
+                    Size = new Size(88, 32),
+                    BackColor = Color.FromArgb(48, 50, 51),
+                    ForeColor = Color.White
+                };
+                cancel.FlatAppearance.BorderColor = Color.FromArgb(70, 74, 74);
+                Button ok = new Button
+                {
+                    Text = "OK",
+                    FlatStyle = FlatStyle.Flat,
+                    Location = new Point(368, 112),
+                    Size = new Size(88, 32),
+                    BackColor = Color.FromArgb(48, 50, 51),
+                    ForeColor = Color.White
+                };
+                ok.FlatAppearance.BorderColor = Color.FromArgb(70, 74, 74);
+                ok.Click += delegate
+                {
+                    string fingerprint = BlockedConnectionStore.NormalizeFingerprint(input.Text);
+                    if (fingerprint.Length == 0)
+                    {
+                        MessageBox.Show(dialog, "Enter a valid 64-character fingerprint.", "Blocked Connection", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    blockedConnectionStore.Add(fingerprint, "Unknown", "Unknown");
+                    ReloadBlockedConnectionsGrid();
+                    LogServerEvent("Fingerprint blocked: " + fingerprint, LogType.Warning);
+                    dialog.DialogResult = DialogResult.OK;
+                    dialog.Close();
+                };
+
+                dialog.Controls.Add(label);
+                dialog.Controls.Add(input);
+                dialog.Controls.Add(cancel);
+                dialog.Controls.Add(ok);
+                dialog.AcceptButton = ok;
+                dialog.CancelButton = cancel;
+                dialog.ShowDialog(this);
+            }
+        }
+
+        private void RemoveSelectedBlockedConnection()
+        {
+            if (blockedConnectionsGridView == null)
+                return;
+            int rowHandle = blockedConnectionsGridView.FocusedRowHandle;
+            if (rowHandle < 0)
+                return;
+
+            string fingerprint = Convert.ToString(blockedConnectionsGridView.GetRowCellValue(rowHandle, "Fingerprint"));
+            if (BlockedConnectionStore.NormalizeFingerprint(fingerprint).Length == 0)
+                return;
+
+            if (blockedConnectionStore.Remove(fingerprint))
+            {
+                ReloadBlockedConnectionsGrid();
+                LogServerEvent("Fingerprint unblocked: " + fingerprint, LogType.Success);
+            }
+        }
+
+        private void BlockSelectedConnections()
+        {
+            int[] rows = gridView == null ? new int[0] : gridView.GetSelectedRows();
+            foreach (int rowHandle in rows)
+            {
+                if (rowHandle < 0)
+                    continue;
+
+                string fingerprint = Convert.ToString(gridView.GetRowCellValue(rowHandle, "Fingerprint"));
+                fingerprint = BlockedConnectionStore.NormalizeFingerprint(fingerprint);
+                if (fingerprint.Length == 0)
+                {
+                    LogServerEvent("Block failed: connection has no valid fingerprint", LogType.Error);
+                    continue;
+                }
+
+                string connectionId = Convert.ToString(gridView.GetRowCellValue(rowHandle, "ConnectionId"));
+                string ip = Convert.ToString(gridView.GetRowCellValue(rowHandle, "IP"));
+                string userName = Convert.ToString(gridView.GetRowCellValue(rowHandle, "UserName"));
+                blockedConnectionStore.Add(fingerprint, ip, userName);
+                CloseConnectionById(connectionId, "Connection blocked");
+                LogServerEvent("Connection blocked: " + fingerprint, LogType.Warning);
+            }
+            ReloadBlockedConnectionsGrid();
+        }
+
+        private void CloseConnectionById(string connectionId, string reason)
+        {
+            if (string.IsNullOrWhiteSpace(connectionId))
+                return;
+
+            TcpClient client = null;
+            lock (connectionStateLock)
+            {
+                connectedClients.TryGetValue(connectionId, out client);
+            }
+            if (client == null)
+                return;
+
+            try { client.Close(); } catch { }
         }
 
         private DevExpress.XtraBars.Navigation.AccordionControlElement CreateNavigationItem(string name, string text)
@@ -4250,6 +4665,7 @@ namespace ZeroTrace_Security_Official
             AssignSidebarIcon(accordionControlElement5, "sidebar_builder.svg");
             AssignSidebarIcon(accordionControlElement9, "sidebar_system.svg");
             AssignSidebarIcon(notificationsNavigationElement, "sidebar_notifications.svg");
+            AssignSidebarIcon(serverLogsNavigationElement, "sidebar_notifications.svg");
             AssignSidebarIcon(pluginManagerNavigationElement, "sidebar_plugin_manager.svg");
             AssignSidebarIcon(blockedConnectionsNavigationElement, "sidebar_blocked.svg");
             AssignSidebarIcon(accordionControlElement12, "sidebar_about.svg");
@@ -4314,6 +4730,7 @@ namespace ZeroTrace_Security_Official
             else if (e.Page == xtraTabPage2) item = accordionControlElement3;
             else if (e.Page == autoTasksTabPage) item = autoTasksNavigationElement;
             else if (e.Page == notificationsTabPage) item = notificationsNavigationElement;
+            else if (e.Page == serverLogsTabPage) item = serverLogsNavigationElement;
             else if (e.Page == pluginManagerTabPage) item = pluginManagerNavigationElement;
             else if (e.Page == blockedConnectionsTabPage) item = blockedConnectionsNavigationElement;
             else if (e.Page == xtraTabPage4) item = null;
@@ -4402,9 +4819,18 @@ namespace ZeroTrace_Security_Official
             connectionsAdministrationMenu.AddItem(connectionsDownloadUpdateItem);
 
             connectionsNetworkingMenu = CreateConnectionMenuGroup("Networking", "menu_networking.svg");
-            connectionsNetworkingMenu.AddItem(CreateConnectionMenuItem("Restart Connection", delegate { }));
-            connectionsCloseItem = CreateConnectionMenuItem("Close Connection", delegate { ShowConnectionConfirmation("Close Connection"); });
-            connectionsBlockItem = CreateConnectionMenuItem("Block Connection", delegate { ShowConnectionConfirmation("Block Connection"); });
+            connectionsNetworkingMenu.AddItem(CreateConnectionMenuItem("Restart Connection", delegate {
+                if (ShowConnectionConfirmation("Restart Connection"))
+                    SendSelectedConnectionCommand("RECONNECT");
+            }));
+            connectionsCloseItem = CreateConnectionMenuItem("Close Connection", delegate {
+                if (ShowConnectionConfirmation("Close Connection"))
+                    SendSelectedConnectionCommand("CLOSE");
+            });
+            connectionsBlockItem = CreateConnectionMenuItem("Block Connection", delegate {
+                if (ShowConnectionConfirmation("Block Connection"))
+                    BlockSelectedConnections();
+            });
             connectionsNetworkingMenu.AddItem(connectionsCloseItem);
             connectionsNetworkingMenu.AddItem(connectionsBlockItem);
 
@@ -4417,10 +4843,22 @@ namespace ZeroTrace_Security_Official
             connectionsPluginsMenu.AddItem(connectionsExPlugin3Item);
 
             connectionsManagementMenu = CreateConnectionMenuGroup("Management", "menu_management.svg");
-            connectionsSleepItem = CreateConnectionMenuItem("Sleep", delegate { });
-            connectionsHibernateItem = CreateConnectionMenuItem("Hibernate", delegate { });
-            connectionsRestartItem = CreateConnectionMenuItem("Restart", delegate { });
-            connectionsShutdownItem = CreateConnectionMenuItem("Shutdown", delegate { });
+            connectionsSleepItem = CreateConnectionMenuItem("Sleep", delegate {
+                if (ShowConnectionConfirmation("Sleep"))
+                    SendSelectedConnectionCommand("SLEEP");
+            });
+            connectionsHibernateItem = CreateConnectionMenuItem("Hibernate", delegate {
+                if (ShowConnectionConfirmation("Hibernate"))
+                    SendSelectedConnectionCommand("HIBERNATE");
+            });
+            connectionsRestartItem = CreateConnectionMenuItem("Restart", delegate {
+                if (ShowConnectionConfirmation("Restart"))
+                    SendSelectedConnectionCommand("RESTART");
+            });
+            connectionsShutdownItem = CreateConnectionMenuItem("Shutdown", delegate {
+                if (ShowConnectionConfirmation("Shutdown"))
+                    SendSelectedConnectionCommand("SHUTDOWN");
+            });
             connectionsManagementMenu.AddItem(connectionsSleepItem);
             connectionsManagementMenu.AddItem(connectionsHibernateItem);
             connectionsManagementMenu.AddItem(connectionsRestartItem);
@@ -4438,14 +4876,139 @@ namespace ZeroTrace_Security_Official
             DisposeSvgImages(connectionMenuIconImages);
         }
 
-        private void ShowConnectionConfirmation(string action)
+        private bool ShowConnectionConfirmation(string action)
         {
-            MessageBox.Show(
+            return MessageBox.Show(
                 "Are you sure you want to " + action.ToLowerInvariant() + "?",
                 action,
                 MessageBoxButtons.OKCancel,
                 MessageBoxIcon.Warning,
-                MessageBoxDefaultButton.Button2);
+                MessageBoxDefaultButton.Button2) == DialogResult.OK;
+        }
+
+        private void SendSelectedConnectionCommand(string command)
+        {
+            List<string> connectionIds = new List<string>();
+            int[] selectedRows = gridView == null ? new int[0] : gridView.GetSelectedRows();
+
+            foreach (int rowHandle in selectedRows)
+            {
+                if (rowHandle < 0)
+                    continue;
+
+                string connectionId = Convert.ToString(gridView.GetRowCellValue(rowHandle, "ConnectionId"));
+                if (!string.IsNullOrWhiteSpace(connectionId) && !connectionIds.Contains(connectionId))
+                    connectionIds.Add(connectionId);
+            }
+
+            foreach (string connectionId in connectionIds)
+            {
+                TcpClient client = null;
+                lock (connectionStateLock)
+                {
+                    connectedClients.TryGetValue(connectionId, out client);
+                }
+
+                if (client == null)
+                {
+                    LogServerEvent(CommandLabel(command) + " command failed: connection unavailable", LogType.Error);
+                    continue;
+                }
+
+                try
+                {
+                    NetworkStream stream = client.GetStream();
+                    byte[] request = Encoding.UTF8.GetBytes("CMD:" + command + "\n");
+                    stream.Write(request, 0, request.Length);
+                    stream.Flush();
+                    TrackPendingCommand(connectionId, command);
+                }
+                catch (IOException)
+                {
+                    LogServerEvent(CommandLabel(command) + " command failed: send error", LogType.Error);
+                }
+                catch (ObjectDisposedException)
+                {
+                    LogServerEvent(CommandLabel(command) + " command failed: connection closed", LogType.Error);
+                }
+                catch (SocketException)
+                {
+                    LogServerEvent(CommandLabel(command) + " command failed: socket error", LogType.Error);
+                }
+            }
+        }
+
+        private static string CommandLabel(string command)
+        {
+            switch ((command ?? string.Empty).Trim().ToUpperInvariant())
+            {
+                case "SLEEP": return "Sleep";
+                case "HIBERNATE": return "Hibernate";
+                case "RESTART": return "Restart";
+                case "SHUTDOWN": return "Shutdown";
+                case "RECONNECT": return "Restart connection";
+                case "CLOSE": return "Close connection";
+                default: return command ?? "Command";
+            }
+        }
+
+        private void TrackPendingCommand(string connectionId, string command)
+        {
+            string key = connectionId + "|" + command.ToUpperInvariant();
+            lock (connectionStateLock)
+            {
+                pendingCommands[key] = new PendingCommand
+                {
+                    ConnectionId = connectionId,
+                    Command = command.ToUpperInvariant(),
+                    SentAtUtc = DateTime.UtcNow
+                };
+            }
+
+            LogServerEvent(CommandLabel(command) + " command sent", LogType.Success);
+            Task.Run(delegate
+            {
+                Thread.Sleep(4000);
+                lock (connectionStateLock)
+                {
+                    if (!pendingCommands.Remove(key))
+                        return;
+                }
+                LogServerEvent(CommandLabel(command) + " command: ACK not received", LogType.Warning);
+            });
+        }
+
+        private void CompletePendingCommand(string connectionId, string command, bool acknowledged)
+        {
+            string key = connectionId + "|" + command.ToUpperInvariant();
+            lock (connectionStateLock)
+            {
+                pendingCommands.Remove(key);
+            }
+
+            if (acknowledged)
+                LogServerEvent(CommandLabel(command) + " command: ACK received", LogType.Warning);
+            else
+                LogServerEvent(CommandLabel(command) + " command failed: agent returned an error", LogType.Error);
+        }
+
+        private void ReportPendingCommandsOnDisconnect(string connectionId)
+        {
+            List<PendingCommand> pending = new List<PendingCommand>();
+            lock (connectionStateLock)
+            {
+                List<string> removeKeys = pendingCommands.Keys
+                    .Where(key => key.StartsWith(connectionId + "|", StringComparison.Ordinal))
+                    .ToList();
+                foreach (string key in removeKeys)
+                {
+                    pending.Add(pendingCommands[key]);
+                    pendingCommands.Remove(key);
+                }
+            }
+
+            foreach (PendingCommand command in pending)
+                LogServerEvent(CommandLabel(command.Command) + " command: ACK not received", LogType.Warning);
         }
 
         private void ShowAdministrationDialog(string selectedAction)

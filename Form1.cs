@@ -32,6 +32,8 @@ namespace ZeroTrace_Security_Official
         private System.Windows.Forms.Timer logUpdateTimer;
         private Thread ciSmokeAutomationThread;
         private volatile bool ciSmokeAutomationStopRequested;
+        private Thread ciNotificationsAutomationThread;
+        private volatile bool ciNotificationsAutomationStopRequested;
         private int maxLogEntries = 1000; // Limit entries to prevent memory issues
         private bool autoScroll = true;
         private string currentPath = string.Empty;
@@ -1099,6 +1101,7 @@ namespace ZeroTrace_Security_Official
             {
                 BeginInvoke(new Action(WriteCiUiValidation));
                 SetupCiSmokeAutomation();
+                SetupCiNotificationsAutomation();
             }
         }
 
@@ -1218,6 +1221,103 @@ namespace ZeroTrace_Security_Official
                 Name = "ZTSEC-CI-Administration-Automation"
             };
             ciSmokeAutomationThread.Start();
+        }
+
+
+        private void SetupCiNotificationsAutomation()
+        {
+            // CI-only page-navigation hook. Match the Administration automation pattern:
+            // a background filesystem poller observes the trigger, consumes it, and
+            // marshals navigation onto the real WinForms UI thread. The marker is written
+            // only after the selected tab and required controls have been verified visible.
+            if (ciNotificationsAutomationThread != null && ciNotificationsAutomationThread.IsAlive)
+                return;
+
+            ciNotificationsAutomationStopRequested = false;
+            ciNotificationsAutomationThread = new Thread((ThreadStart)delegate
+            {
+                string baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
+                string triggerPath = Path.Combine(baseDirectory, "ci-open-notifications.flag");
+                string consumedPath = Path.Combine(baseDirectory, "ci-open-notifications-consumed.flag");
+                string errorPath = Path.Combine(baseDirectory, "ci-notifications-page-error.txt");
+
+                while (!ciNotificationsAutomationStopRequested)
+                {
+                    if (!File.Exists(triggerPath))
+                    {
+                        Thread.Sleep(100);
+                        continue;
+                    }
+
+                    try
+                    {
+                        File.Delete(triggerPath);
+                    }
+                    catch (Exception ex)
+                    {
+                        try
+                        {
+                            File.WriteAllText(errorPath,
+                                "TRIGGER_DELETE_FAILED|" + DateTime.UtcNow.ToString("O") + "|" + ex);
+                        }
+                        catch { }
+                        Thread.Sleep(100);
+                        continue;
+                    }
+
+                    try
+                    {
+                        File.WriteAllText(
+                            consumedPath,
+                            "CONSUMED|" + DateTime.UtcNow.ToString("O") + "|BaseDirectory=" + baseDirectory);
+                    }
+                    catch
+                    {
+                        // Page navigation below remains the actual UI signal.
+                    }
+
+                    try
+                    {
+                        if (IsDisposed || Disposing)
+                            return;
+
+                        BeginInvoke(new Action(delegate
+                        {
+                            try
+                            {
+                                NavigateToNotificationsForCi();
+                            }
+                            catch (Exception ex)
+                            {
+                                LogToMonitor("CI notifications page automation failed: " + ex.Message, LogType.Error);
+                                try
+                                {
+                                    File.WriteAllText(errorPath,
+                                        "NAVIGATE_FAILED|" + DateTime.UtcNow.ToString("O") + "|" + ex);
+                                }
+                                catch { }
+                            }
+                        }));
+                    }
+                    catch (Exception ex)
+                    {
+                        try
+                        {
+                            File.WriteAllText(errorPath,
+                                "BEGININVOKE_FAILED|" + DateTime.UtcNow.ToString("O") + "|" + ex);
+                        }
+                        catch { }
+                        return;
+                    }
+
+                    return;
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "ZTSEC-CI-Notifications-Automation"
+            };
+            ciNotificationsAutomationThread.Start();
         }
 
         private void WriteCiUiValidation()
@@ -2438,6 +2538,8 @@ namespace ZeroTrace_Security_Official
 
             ciSmokeAutomationStopRequested = true;
             ciSmokeAutomationThread = null;
+            ciNotificationsAutomationStopRequested = true;
+            ciNotificationsAutomationThread = null;
 
             if (cpuCounter != null)
                 cpuCounter.Dispose();

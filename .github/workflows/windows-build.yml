@@ -865,12 +865,18 @@ jobs:
           # Screenshot 3: navigate to the real Notifications page through the
           # application-owned CI hook and capture the actual rendered page.
           $notificationsTrigger = Join-Path $output 'ci-open-notifications.flag'
+          $notificationsConsumed = Join-Path $output 'ci-open-notifications-consumed.flag'
           $notificationsMarker = Join-Path $output 'ci-notifications-page-opened.flag'
           $notificationsError = Join-Path $output 'ci-notifications-page-error.txt'
           Set-Content -LiteralPath $notificationsTrigger -Value '1' -Encoding ascii
 
           $notificationPageReady = $false
+          $notificationsTriggerConsumed = $false
           for ($notificationAttempt = 1; $notificationAttempt -le 60; $notificationAttempt++) {
+            if (-not $notificationsTriggerConsumed -and (Test-Path -LiteralPath $notificationsConsumed -PathType Leaf)) {
+              $notificationsTriggerConsumed = $true
+              Write-Host 'CI notifications trigger was observed and consumed by the freshly built application.'
+            }
             if (Test-Path -LiteralPath $notificationsError -PathType Leaf) {
               throw "Notifications page automation failed: $(Get-Content -LiteralPath $notificationsError -Raw)"
             }
@@ -880,13 +886,30 @@ jobs:
                 $notificationPageReady = $true
                 break
               }
+              Remove-Item -LiteralPath $notificationsMarker -Force -ErrorAction SilentlyContinue
             }
             $process.Refresh()
             if ($process.HasExited) { throw "Application exited while opening the Notifications page. ExitCode=$($process.ExitCode)" }
             Start-Sleep -Milliseconds 200
           }
           if (-not $notificationPageReady) {
-            throw 'The freshly built application did not report the Notifications page as visible within the bounded wait.'
+            $startupLog = Join-Path $output 'startup-error.log'
+            $detail = if (Test-Path -LiteralPath $startupLog -PathType Leaf) { Get-Content -LiteralPath $startupLog -Raw } else { 'No startup-error.log was produced.' }
+            $triggerStatus = if (Test-Path -LiteralPath $notificationsTrigger -PathType Leaf) { 'trigger still present (application-side watcher did not consume it)' } elseif ($notificationsTriggerConsumed) { 'trigger consumed (application-side watcher observed it)' } else { 'trigger file absent but no consume marker was observed' }
+            $automationError = if (Test-Path -LiteralPath $notificationsError -PathType Leaf) { Get-Content -LiteralPath $notificationsError -Raw } else { 'No notifications page automation error was produced.' }
+            $diagnostic = Join-Path $output 'ci-notifications-page-timeout.txt'
+            @(
+              "TIMEOUT UTC=$([DateTime]::UtcNow.ToString('O'))"
+              "PID=$($process.Id)"
+              "MainWindowHandle=$($process.MainWindowHandle)"
+              "MainWindowTitle=$($process.MainWindowTitle)"
+              "Trigger=$triggerStatus"
+              "ConsumeMarkerExists=$(Test-Path -LiteralPath $notificationsConsumed -PathType Leaf)"
+              "MarkerExists=$(Test-Path -LiteralPath $notificationsMarker -PathType Leaf)"
+              "AutomationError=$automationError"
+              "StartupLog=$detail"
+            ) | Set-Content -LiteralPath $diagnostic -Encoding utf8
+            throw "The freshly built application did not report the Notifications page as visible within the bounded wait. $triggerStatus`nAutomationError: $automationError`n$detail`nDiagnostic: $diagnostic"
           }
 
           Start-Sleep -Milliseconds 400

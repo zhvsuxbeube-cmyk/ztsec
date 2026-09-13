@@ -474,6 +474,22 @@ namespace ZeroTrace_Security_Official
             {
                 var cb = (CheckBox)s;
                 cb.Region = new Region(RoundedRect(new Rectangle(0, 0, cb.Width - 1, cb.Height - 1), cb.Height / 2));
+                cb.Invalidate();
+            };
+            toggle.HandleCreated += (s, e) =>
+            {
+                var cb = (CheckBox)s;
+                cb.Region = new Region(RoundedRect(new Rectangle(0, 0, cb.Width - 1, cb.Height - 1), cb.Height / 2));
+                cb.Invalidate();
+            };
+            toggle.VisibleChanged += (s, e) =>
+            {
+                var cb = (CheckBox)s;
+                if (cb.Visible)
+                {
+                    cb.Region = new Region(RoundedRect(new Rectangle(0, 0, cb.Width - 1, cb.Height - 1), cb.Height / 2));
+                    cb.Invalidate();
+                }
             };
 
             toggle.Paint += (s, e) =>

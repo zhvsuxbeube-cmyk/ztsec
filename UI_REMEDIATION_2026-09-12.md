@@ -31,3 +31,11 @@ CI now validates the Notifications page structure, opens the real page through a
 - Removed `System.Runtime.Serialization` project reference; runtime JSON persistence no longer requires `System.Xml` APIs.
 - Excluded the decrypted Telegram token property from JSON serialization with `ScriptIgnore`.
 - Fixed `DataGridView.DisplayedRowCount` invocation in the Server Logs scroll check.
+
+## Blocked Connections and final spacing refinement
+- Blocked Connections now follows the Connections grid's selection interaction: row-select mode, row-focus behavior, pre-click selection capture, post-click toggle-off, and `#1A2028` full-row selected rendering.
+- Blocked Connections opens with no focused/selected row and clears focus after reload.
+- Blocked Connections columns were widened modestly for clearer separation without excessive empty space; fingerprint display is truncated with an ellipsis while the stored value remains intact.
+- Connections HWID/Fingerprint column widths were reduced to match their shortened display treatment, removing the former unused horizontal space.
+- Server Logs header height was increased slightly so the `Connection and command results` subtitle has a small visible gap before the `Value`/`Status` row.
+- Notification toggle controls now re-apply their rounded region and repaint at handle creation/visibility/resize, keeping the rounded shape visible before hover.

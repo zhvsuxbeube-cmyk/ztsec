@@ -137,6 +137,8 @@ namespace ZeroTrace_Security_Official
         private DevExpress.XtraEditors.SimpleButton connectionsSearchCloseButton;
         private string connectionMouseDownSelectionId = string.Empty;
         private bool connectionMouseDownWasSelected;
+        private string blockedMouseDownFingerprint = string.Empty;
+        private bool blockedMouseDownWasSelected;
 
         private sealed class PendingCommand
         {
@@ -1614,8 +1616,8 @@ namespace ZeroTrace_Security_Official
             gridView.Columns["Uptime"].Width = 110;
             gridView.Columns["AFKTime"].Width = 110;
             gridView.Columns["Ping"].Width = 85;
-            gridView.Columns["HWID"].Width = 260;
-            gridView.Columns["Fingerprint"].Width = 330;
+            gridView.Columns["HWID"].Width = 170;
+            gridView.Columns["Fingerprint"].Width = 220;
             gridView.Columns["ConnectionId"].Visible = false;
 
             // Keep the connection identity and health fields in the initial viewport.
@@ -4193,7 +4195,7 @@ namespace ZeroTrace_Security_Official
             Panel header = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = 104,
+                Height = 112,
                 BackColor = Color.FromArgb(38, 38, 38),
                 Padding = new Padding(0)
             };
@@ -4346,9 +4348,10 @@ namespace ZeroTrace_Security_Official
             blockedConnectionsGridView.OptionsSelection.EnableAppearanceFocusedRow = true;
             blockedConnectionsGridView.OptionsSelection.MultiSelect = true;
             blockedConnectionsGridView.OptionsSelection.MultiSelectMode = DevExpress.XtraGrid.Views.Grid.GridMultiSelectMode.RowSelect;
+            blockedConnectionsGridView.FocusRectStyle = DevExpress.XtraGrid.Views.Grid.DrawFocusRectStyle.RowFocus;
             blockedConnectionsGridView.OptionsView.ShowGroupPanel = false;
             blockedConnectionsGridView.OptionsView.ColumnAutoWidth = false;
-            blockedConnectionsGridView.RowHeight = 32;
+            blockedConnectionsGridView.RowHeight = 34;
             blockedConnectionsGridView.RowStyle += delegate(object sender, DevExpress.XtraGrid.Views.Grid.RowStyleEventArgs e)
             {
                 if (e.RowHandle >= 0 && blockedConnectionsGridView.IsRowSelected(e.RowHandle))
@@ -4388,6 +4391,7 @@ namespace ZeroTrace_Security_Official
             blockedConnectionsPopupMenu.AddItem(blockedConnectionsRemoveItem);
 
             blockedConnectionsGrid.MouseDown += BlockedConnectionsGrid_MouseDown;
+            blockedConnectionsGridView.RowClick += BlockedConnectionsGridView_RowClick;
             blockedConnectionsGrid.MouseUp += delegate(object sender, MouseEventArgs e)
             {
                 if (e.Button == MouseButtons.Right && blockedConnectionsPopupMenu != null)
@@ -4400,17 +4404,64 @@ namespace ZeroTrace_Security_Official
 
         private void BlockedConnectionsGrid_MouseDown(object sender, MouseEventArgs e)
         {
-            if (e.Button != MouseButtons.Right || blockedConnectionsGridView == null)
+            blockedMouseDownFingerprint = string.Empty;
+            blockedMouseDownWasSelected = false;
+
+            if (e.Button != MouseButtons.Left || blockedConnectionsGridView == null)
                 return;
 
             DevExpress.XtraGrid.Views.Grid.ViewInfo.GridHitInfo hit =
                 blockedConnectionsGridView.CalcHitInfo(e.Location);
-            if (hit.InRow && hit.RowHandle >= 0 && !blockedConnectionsGridView.IsRowSelected(hit.RowHandle))
+
+            if (hit.InRow && hit.RowHandle >= 0)
             {
-                blockedConnectionsGridView.ClearSelection();
-                blockedConnectionsGridView.SelectRow(hit.RowHandle);
-                blockedConnectionsGridView.FocusedRowHandle = hit.RowHandle;
+                blockedMouseDownFingerprint = Convert.ToString(
+                    blockedConnectionsGridView.GetRowCellValue(hit.RowHandle, "Fingerprint"));
+                blockedMouseDownWasSelected = blockedConnectionsGridView.IsRowSelected(hit.RowHandle);
+                return;
             }
+
+            if (hit.HitTest == GridHitTest.EmptyRow)
+                blockedConnectionsGridView.ClearSelection();
+        }
+
+        private void BlockedConnectionsGridView_RowClick(object sender, DevExpress.XtraGrid.Views.Grid.RowClickEventArgs e)
+        {
+            if (e.RowHandle < 0 || e.Button != MouseButtons.Left)
+                return;
+
+            if (!blockedMouseDownWasSelected || string.IsNullOrWhiteSpace(blockedMouseDownFingerprint))
+                return;
+
+            string fingerprint = blockedMouseDownFingerprint;
+            BeginInvoke(new Action(() => UnselectBlockedConnectionByFingerprint(fingerprint)));
+        }
+
+        private void UnselectBlockedConnectionByFingerprint(string fingerprint)
+        {
+            if (IsDisposed || !IsHandleCreated || blockedConnectionsGridView == null || string.IsNullOrWhiteSpace(fingerprint))
+                return;
+
+            int[] selectedRows = blockedConnectionsGridView.GetSelectedRows();
+            if (selectedRows == null)
+                return;
+
+            foreach (int rowHandle in selectedRows)
+            {
+                if (rowHandle < 0)
+                    continue;
+
+                string selectedFingerprint = Convert.ToString(
+                    blockedConnectionsGridView.GetRowCellValue(rowHandle, "Fingerprint"));
+                if (string.Equals(selectedFingerprint, fingerprint, StringComparison.OrdinalIgnoreCase))
+                {
+                    blockedConnectionsGridView.UnselectRow(rowHandle);
+                    break;
+                }
+            }
+
+            if (blockedConnectionsGridView.GetSelectedRows().Length == 0)
+                blockedConnectionsGridView.FocusedRowHandle = DevExpress.XtraGrid.GridControl.InvalidRowHandle;
         }
 
         private void ReloadBlockedConnectionsGrid()
@@ -4433,18 +4484,36 @@ namespace ZeroTrace_Security_Official
                 if (blockedConnectionsGridView.Columns["IP"] != null)
                 {
                     blockedConnectionsGridView.Columns["IP"].Caption = "IP Address";
-                    blockedConnectionsGridView.Columns["IP"].Width = 180;
+                    blockedConnectionsGridView.Columns["IP"].Width = 205;
                 }
                 if (blockedConnectionsGridView.Columns["UserName"] != null)
                 {
                     blockedConnectionsGridView.Columns["UserName"].Caption = "User Name";
-                    blockedConnectionsGridView.Columns["UserName"].Width = 240;
+                    blockedConnectionsGridView.Columns["UserName"].Width = 250;
                 }
                 if (blockedConnectionsGridView.Columns["Fingerprint"] != null)
                 {
                     blockedConnectionsGridView.Columns["Fingerprint"].Caption = "Fingerprint";
-                    blockedConnectionsGridView.Columns["Fingerprint"].Width = 420;
+                    blockedConnectionsGridView.Columns["Fingerprint"].Width = 300;
                 }
+
+                blockedConnectionsGridView.CustomColumnDisplayText -= BlockedConnectionsGridView_CustomColumnDisplayText;
+                blockedConnectionsGridView.CustomColumnDisplayText += BlockedConnectionsGridView_CustomColumnDisplayText;
+                blockedConnectionsGridView.ClearSelection();
+                blockedConnectionsGridView.FocusedRowHandle = DevExpress.XtraGrid.GridControl.InvalidRowHandle;
+            }
+        }
+
+        private void BlockedConnectionsGridView_CustomColumnDisplayText(object sender, DevExpress.XtraGrid.Views.Base.CustomColumnDisplayTextEventArgs args)
+        {
+            if (args.Value == null)
+                return;
+
+            if (args.Column != null && args.Column.FieldName == "Fingerprint")
+            {
+                string value = Convert.ToString(args.Value);
+                if (value.Length > 16)
+                    args.DisplayText = value.Substring(0, 16) + "...";
             }
         }
 

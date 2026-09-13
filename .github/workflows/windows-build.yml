@@ -242,13 +242,13 @@ jobs:
           $notificationFormText = Get-Content -LiteralPath (Join-Path $projectRoot 'Form1.Notifications.cs') -Raw
           $telegramText = Get-Content -LiteralPath (Join-Path $projectRoot 'TelegramNotificationService.cs') -Raw
           $settingsText = Get-Content -LiteralPath (Join-Path $projectRoot 'NotificationSettings.cs') -Raw
-          foreach ($needle in @('Windows Notifications','Telegram Notifications','Bot Token','Chat ID','Test Connection')) {
+          foreach ($needle in @('Windows Notifications','Telegram Notifications','Bot Token','Chat ID','Send Test')) {
             if ($notificationFormText -notmatch [regex]::Escape($needle)) { throw "Notifications page is missing required UI text: $needle" }
           }
           foreach ($needle in @('Name: ','Tag: ','IP: ','Country: ')) {
             if ($telegramText -notmatch [regex]::Escape($needle)) { throw "Telegram connection message is missing required field: $needle" }
           }
-          if ($formText -notmatch 'HandleNewConnectionNotification\(nickname, tag, clientIp, country\)') { throw 'New-connection notification hook is missing from the connection row creation path.' }
+          if ($formText -notmatch 'HandleNewConnectionNotification\(userName, tag, clientIp, country\)') { throw 'New-connection notification hook is missing from the connection row creation path.' }
           if ($settingsText -notmatch 'ProtectedData\.Protect' -or $settingsText -notmatch 'ProtectedData\.Unprotect') { throw 'Telegram Bot Token persistence is not protected with Windows DPAPI.' }
           if ($formText -notmatch 'SidebarGroupHeight\s*=\s*36') { throw 'Sidebar group height is not set to the tuned 36 logical pixels.' }
           if ($formText -notmatch 'SidebarItemHeight\s*=\s*28') { throw 'Sidebar item height is not set to the tuned 28 logical pixels.' }

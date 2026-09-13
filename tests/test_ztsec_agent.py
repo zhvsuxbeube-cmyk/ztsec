@@ -85,6 +85,16 @@ def test_power_command_ack_without_invoking_windows():
 
 
 async def integration_reconnect_and_close():
+    # Keep this integration test focused on socket/retry semantics.
+    # The real Windows telemetry collectors can legitimately take several
+    # seconds and are covered by the application/agent runtime itself.
+    original_static = agent._get_static_telemetry
+    original_collect = agent.collect_telemetry
+    agent._get_static_telemetry = lambda: {
+        "fingerprint": "a" * 64,
+    }
+    agent.collect_telemetry = lambda index, host, port, ping_ms=-1: "Test|ZTSecurity|127.0.0.1|Local|Unknown|Unknown|Unknown|Unknown|Unknown|Unknown|Unknown|Unknown|Unknown|Unknown"
+
     received = []
     connection_count = 0
     connection_times = []
@@ -139,6 +149,8 @@ async def integration_reconnect_and_close():
         await asyncio.gather(task, return_exceptions=True)
         server.close()
         await server.wait_closed()
+        agent._get_static_telemetry = original_static
+        agent.collect_telemetry = original_collect
 
 
 if __name__ == "__main__":

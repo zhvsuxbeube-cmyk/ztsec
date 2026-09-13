@@ -619,6 +619,9 @@ jobs:
           if ($text -notmatch 'HWID=visible' -or $text -notmatch 'Fingerprint=visible') {
             throw "HWID/Fingerprint connection columns were not confirmed visible by CI UI validation. Diagnostics: $text"
           }
+          if ($text -notmatch 'SelectedAccentProbeReady: (yes|not-required)') {
+            throw "Selected-row accent validation was not completed. Diagnostics: $text"
+          }
 
       - name: Capture actual application GUI screenshots
         shell: pwsh

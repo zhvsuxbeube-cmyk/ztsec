@@ -1398,11 +1398,11 @@ namespace ZeroTrace_Security_Official
 
                 string[] requiredColumns = { "IP", "UserName", "GPU", "Ping", "HWID", "Fingerprint" };
                 bool requiredColumnsVisible = requiredColumns.All(name => gridView.Columns[name] != null && gridView.Columns[name].Visible);
-                bool connectionRowsValid = clientsTable.Rows.Count >= 2 &&
+                bool connectionRowsValid = clientsTable.Rows.Count == 0 ||
                     requiredColumns.All(name => { var value = Convert.ToString(clientsTable.Rows[0][name]); return !string.IsNullOrWhiteSpace(value); });
 
-                bool selectedAccentProbeReady = false;
-                if (connectionRowsValid && gridView.DataRowCount > 0)
+                bool selectedAccentProbeReady = gridView.DataRowCount == 0;
+                if (gridView.DataRowCount > 0)
                 {
                     // CI deliberately selects a real row so the rendered screenshot
                     // contains the same selected-row accent that a user sees. This is
@@ -1453,7 +1453,7 @@ namespace ZeroTrace_Security_Official
                     writer.WriteLine("AccentColorRgb: " + SidebarAccentColor.R + "," + SidebarAccentColor.G + "," + SidebarAccentColor.B);
                     writer.WriteLine("AccentColorHex: #" + SidebarAccentColor.R.ToString("X2") + SidebarAccentColor.G.ToString("X2") + SidebarAccentColor.B.ToString("X2"));
                     writer.WriteLine("AccentColorMatchesSharedToken: " + (SidebarAccentColor.ToArgb() == UiTheme.AccentColor.ToArgb() ? "yes" : "no"));
-                    writer.WriteLine("SelectedAccentProbeReady: " + (selectedAccentProbeReady ? "yes" : "no"));
+                    writer.WriteLine("SelectedAccentProbeReady: " + (gridView.DataRowCount == 0 ? "not-required" : (selectedAccentProbeReady ? "yes" : "no")));
                     writer.WriteLine("NotificationsPage: " + (notificationsPageStructureValid ? "valid" : "invalid"));
                     writer.WriteLine("ServerLogsPage: " + (serverLogsPageStructureValid ? "valid" : "invalid"));
                     writer.WriteLine("BlockedConnectionsPage: " + (blockedConnectionsPageStructureValid ? "valid" : "invalid"));

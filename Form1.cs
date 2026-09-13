@@ -126,6 +126,7 @@ namespace ZeroTrace_Security_Official
         private readonly HashSet<string> selectedConnectionIds = new HashSet<string>(StringComparer.Ordinal);
         private readonly HashSet<string> pendingTelemetryRefreshes = new HashSet<string>(StringComparer.Ordinal);
         private readonly BlockedConnectionStore blockedConnectionStore = new BlockedConnectionStore();
+        private readonly HashSet<string> blockedConnectionRejectionLogged = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, PendingCommand> pendingCommands = new Dictionary<string, PendingCommand>(StringComparer.Ordinal);
         private readonly Dictionary<string, long> telemetryRequestTicks = new Dictionary<string, long>();
         private DevExpress.XtraEditors.PanelControl connectionsLayoutHost;
@@ -1641,6 +1642,16 @@ namespace ZeroTrace_Security_Official
                 }
             };
 
+            gridView.CustomColumnDisplayText += (sender, args) =>
+            {
+                if ((args.Column.FieldName == "HWID" || args.Column.FieldName == "Fingerprint") && args.Value != null)
+                {
+                    string value = Convert.ToString(args.Value);
+                    if (value.Length > 16)
+                        args.DisplayText = value.Substring(0, 16) + "...";
+                }
+            };
+
             gridView.FocusedRowChanged += GridView_FocusedRowChanged;
             gridView.MouseDown += GridView_MouseDown;
             gridView.RowClick += GridView_RowClick;
@@ -2801,7 +2812,11 @@ namespace ZeroTrace_Security_Official
 
                     if (blockedConnectionStore.Contains(fingerprint))
                     {
-                        LogServerEvent("Blocked connection rejected: " + fingerprint, LogType.Warning);
+                        lock (connectionStateLock)
+                        {
+                            if (blockedConnectionRejectionLogged.Add(fingerprint))
+                                LogServerEvent("Blocked connection rejected: " + fingerprint, LogType.Warning);
+                        }
                         return;
                     }
 
@@ -4196,7 +4211,7 @@ namespace ZeroTrace_Security_Official
                 AutoSize = true,
                 ForeColor = Color.FromArgb(224, 224, 224),
                 Font = new Font("Tahoma", 9.75F, FontStyle.Regular),
-                Location = new Point(18, 62)
+                Location = new Point(18, 51)
             };
             header.Controls.Add(title);
             header.Controls.Add(subtitle);
@@ -4329,6 +4344,8 @@ namespace ZeroTrace_Security_Official
             blockedConnectionsGridView.OptionsBehavior.Editable = false;
             blockedConnectionsGridView.OptionsSelection.EnableAppearanceFocusedCell = false;
             blockedConnectionsGridView.OptionsSelection.EnableAppearanceFocusedRow = true;
+            blockedConnectionsGridView.OptionsSelection.MultiSelect = true;
+            blockedConnectionsGridView.OptionsSelection.MultiSelectMode = DevExpress.XtraGrid.Views.Grid.GridMultiSelectMode.RowSelect;
             blockedConnectionsGridView.OptionsView.ShowGroupPanel = false;
             blockedConnectionsGridView.OptionsView.ColumnAutoWidth = false;
             blockedConnectionsGridView.RowHeight = 32;
@@ -4494,6 +4511,10 @@ namespace ZeroTrace_Security_Official
                         return;
                     }
                     blockedConnectionStore.Add(fingerprint, "Unknown", "Unknown");
+                    lock (connectionStateLock)
+                    {
+                        blockedConnectionRejectionLogged.Remove(fingerprint);
+                    }
                     ReloadBlockedConnectionsGrid();
                     LogServerEvent("Fingerprint blocked: " + fingerprint, LogType.Warning);
                     dialog.DialogResult = DialogResult.OK;
@@ -4524,6 +4545,10 @@ namespace ZeroTrace_Security_Official
 
             if (blockedConnectionStore.Remove(fingerprint))
             {
+                lock (connectionStateLock)
+                {
+                    blockedConnectionRejectionLogged.Remove(fingerprint);
+                }
                 ReloadBlockedConnectionsGrid();
                 LogServerEvent("Fingerprint unblocked: " + fingerprint, LogType.Success);
             }

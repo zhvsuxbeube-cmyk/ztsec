@@ -464,11 +464,17 @@ namespace ZeroTrace_Security_Official
                 Cursor                = Cursors.Hand,
                 TextAlign             = ContentAlignment.MiddleCenter
             };
+            toggle.Region = new Region(RoundedRect(new Rectangle(0, 0, toggle.Width - 1, toggle.Height - 1), toggle.Height / 2));
             toggle.FlatAppearance.BorderSize             = 0;
             toggle.FlatAppearance.BorderColor            = NBo;
             toggle.FlatAppearance.CheckedBackColor       = NA;
             toggle.FlatAppearance.MouseDownBackColor     = Color.Transparent;
             toggle.FlatAppearance.MouseOverBackColor     = Color.Transparent;
+            toggle.Resize += (s, e) =>
+            {
+                var cb = (CheckBox)s;
+                cb.Region = new Region(RoundedRect(new Rectangle(0, 0, cb.Width - 1, cb.Height - 1), cb.Height / 2));
+            };
 
             toggle.Paint += (s, e) =>
             {

@@ -59,7 +59,7 @@ namespace ZeroTrace_Security_Official
         private DevExpress.XtraGrid.Views.Grid.GridView blockedConnectionsGridView;
         private DataTable blockedConnectionsTable;
         private ContextMenuStrip blockedConnectionsContextMenu;
-        private System.Windows.Forms.RichTextBox serverLogsRichTextBox;
+        private System.Windows.Forms.DataGridView serverLogsGrid;
         private ContextMenuStrip connectionsContextMenu;
         private DevExpress.XtraBars.PopupMenu connectionsPopupMenu;
         private DevExpress.XtraBars.BarSubItem connectionsAdministrationMenu;
@@ -992,18 +992,10 @@ namespace ZeroTrace_Security_Official
 
         private void InitializeLogging()
         {
-            richTextBox1.BackColor = Color.Black;
-            richTextBox1.ForeColor = Color.White;
-            richTextBox1.Font = new Font("Consolas", 9F, FontStyle.Regular);
-            richTextBox1.ReadOnly = true;
-
             logUpdateTimer = new System.Windows.Forms.Timer();
             logUpdateTimer.Interval = 500;
             logUpdateTimer.Tick += ProcessLogQueue;
             logUpdateTimer.Start();
-
-            AppendServerSettingsLog("Server settings ready", LogType.System);
-            AppendServerSettingsLog("Port listening status is shown here", LogType.Info);
         }
 
         public void LogToMonitor(string message, LogType type)
@@ -1024,9 +1016,28 @@ namespace ZeroTrace_Security_Official
             }
         }
 
+        private static readonly object serverErrorLogLock = new object();
+
         private void LogServerEvent(string message, LogType type)
         {
             LogToMonitor(message, type);
+
+            if (type == LogType.Error)
+            {
+                try
+                {
+                    string errorLogPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "error.log");
+                    string line = "[" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + "] " + (message ?? string.Empty);
+                    lock (serverErrorLogLock)
+                    {
+                        File.AppendAllText(errorLogPath, line + Environment.NewLine, Encoding.UTF8);
+                    }
+                }
+                catch
+                {
+                    // Logging must never interrupt the server path.
+                }
+            }
         }
 
         private void AppendServerSettingsLog(string message, LogType type)
@@ -1047,55 +1058,61 @@ namespace ZeroTrace_Security_Official
 
         private void ProcessLogQueue(object sender, EventArgs e)
         {
-            if (logQueue.IsEmpty || serverLogsRichTextBox == null)
+            if (logQueue.IsEmpty || serverLogsGrid == null)
                 return;
-
-            if (serverLogsRichTextBox.Lines.Length > maxLogEntries)
-            {
-                serverLogsRichTextBox.SuspendLayout();
-                int cutoff = serverLogsRichTextBox.GetFirstCharIndexFromLine(
-                    serverLogsRichTextBox.Lines.Length - maxLogEntries);
-                if (cutoff > 0)
-                {
-                    serverLogsRichTextBox.Select(0, cutoff);
-                    serverLogsRichTextBox.SelectedText = "";
-                }
-                serverLogsRichTextBox.ResumeLayout();
-            }
 
             int processCount = Math.Min(100, logQueue.Count);
             if (processCount == 0)
                 return;
 
-            serverLogsRichTextBox.SuspendLayout();
             bool wasAtBottom = IsServerLogsScrolledToBottom();
+            serverLogsGrid.SuspendLayout();
             for (int i = 0; i < processCount; i++)
             {
                 LogEntry entry;
                 if (!logQueue.TryDequeue(out entry))
                     break;
 
-                string formatted = "[" + entry.Timestamp.ToString("HH:mm:ss.fff") + "] " +
-                                   entry.Message + Environment.NewLine;
-                int startIndex = serverLogsRichTextBox.TextLength;
-                serverLogsRichTextBox.AppendText(formatted);
-                serverLogsRichTextBox.Select(startIndex, formatted.Length);
-                serverLogsRichTextBox.SelectionColor = entry.GetColor();
-                serverLogsRichTextBox.SelectionLength = 0;
+                int rowIndex = serverLogsGrid.Rows.Add(
+                    "[" + entry.Timestamp.ToString("HH:mm:ss.fff") + "] " + entry.Message,
+                    GetLogStatusText(entry.Type));
+                DataGridViewRow row = serverLogsGrid.Rows[rowIndex];
+                Color color = entry.GetColor();
+                row.Cells[0].Style.ForeColor = color;
+                row.Cells[1].Style.ForeColor = color;
             }
 
-            if (wasAtBottom && autoScroll)
+            while (serverLogsGrid.Rows.Count > maxLogEntries)
+                serverLogsGrid.Rows.RemoveAt(0);
+
+            if (wasAtBottom && autoScroll && serverLogsGrid.Rows.Count > 0)
+                serverLogsGrid.FirstDisplayedScrollingRowIndex = serverLogsGrid.Rows.Count - 1;
+            serverLogsGrid.ClearSelection();
+            serverLogsGrid.ResumeLayout();
+        }
+
+        private static string GetLogStatusText(LogType type)
+        {
+            switch (type)
             {
-                serverLogsRichTextBox.SelectionStart = serverLogsRichTextBox.Text.Length;
-                serverLogsRichTextBox.ScrollToCaret();
+                case LogType.Success:
+                case LogType.Connection:
+                    return "Success";
+                case LogType.Warning:
+                case LogType.Security:
+                    return "Warning";
+                case LogType.Error:
+                    return "Error";
+                default:
+                    return "Info";
             }
-            serverLogsRichTextBox.ResumeLayout();
         }
 
         private bool IsServerLogsScrolledToBottom()
         {
-            return serverLogsRichTextBox == null ||
-                   serverLogsRichTextBox.SelectionStart >= serverLogsRichTextBox.Text.Length - 10;
+            if (serverLogsGrid == null || serverLogsGrid.Rows.Count == 0)
+                return true;
+            return serverLogsGrid.FirstDisplayedScrollingRowIndex + serverLogsGrid.DisplayedRowCount >= serverLogsGrid.Rows.Count - 1;
         }
 
         private void Form1_Load(object sender, EventArgs e)
@@ -1402,8 +1419,8 @@ namespace ZeroTrace_Security_Official
                 int expectedSidebarDeviceWidth = ScaleLogicalPixels(SidebarWidth, currentDpi);
                 bool sidebarWidthValid = accordionControl1.Width == expectedSidebarDeviceWidth;
                 bool serverLogsPageStructureValid =
-                    serverLogsTabPage != null && serverLogsRichTextBox != null &&
-                    serverLogsTabPage.Controls.Contains(serverLogsRichTextBox);
+                    serverLogsTabPage != null && serverLogsGrid != null &&
+                    serverLogsTabPage.Controls.Contains(serverLogsGrid);
                 bool blockedConnectionsPageStructureValid =
                     blockedConnectionsTabPage != null && blockedConnectionsGrid != null &&
                     blockedConnectionsGridView != null && blockedConnectionsTable != null &&
@@ -2624,7 +2641,7 @@ namespace ZeroTrace_Security_Official
             {
                 isServerRunning = false;
                 tcpServer = null;
-                AppendServerSettingsLog("Port listen failed: " + ex.Message, LogType.Error);
+                LogServerEvent("Port listen failed: " + ex.Message, LogType.Error);
                 MessageBox.Show($"Unable to listen on port {port}: {ex.Message}",
                     "Server Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
@@ -2632,7 +2649,7 @@ namespace ZeroTrace_Security_Official
             {
                 isServerRunning = false;
                 tcpServer = null;
-                AppendServerSettingsLog("Port listen failed: " + ex.Message, LogType.Error);
+                LogServerEvent("Port listen failed: " + ex.Message, LogType.Error);
                 MessageBox.Show($"Error starting server: {ex.Message}",
                     "Server Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
@@ -2663,7 +2680,7 @@ namespace ZeroTrace_Security_Official
             }
             catch (Exception ex)
             {
-                AppendServerSettingsLog("Port stop failed: " + ex.Message, LogType.Error);
+                LogServerEvent("Port stop failed: " + ex.Message, LogType.Error);
             }
         }
         private void RunServer(int port)
@@ -3221,7 +3238,7 @@ namespace ZeroTrace_Security_Official
             }
             catch (Exception ex)
             {
-                AppendServerSettingsLog("Port listen failed: " + ex.Message, LogType.Error);
+                LogServerEvent("Port listen failed: " + ex.Message, LogType.Error);
                 MessageBox.Show("Error starting server: " + ex.Message);
             }
         }
@@ -3251,7 +3268,7 @@ namespace ZeroTrace_Security_Official
             }
     catch (Exception ex)
     {
-        AppendServerSettingsLog("Port stop failed: " + ex.Message, LogType.Error);
+        LogServerEvent("Port stop failed: " + ex.Message, LogType.Error);
         MessageBox.Show("Error stopping server: " + ex.Message);
     }
         }
@@ -4138,9 +4155,9 @@ namespace ZeroTrace_Security_Official
             Panel header = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = 74,
+                Height = 104,
                 BackColor = Color.FromArgb(38, 38, 38),
-                Padding = new Padding(24, 16, 24, 8)
+                Padding = new Padding(24, 14, 24, 0)
             };
             Label title = new Label
             {
@@ -4161,20 +4178,95 @@ namespace ZeroTrace_Security_Official
             header.Controls.Add(title);
             header.Controls.Add(hint);
 
-            serverLogsRichTextBox = new RichTextBox
+            Panel tableHeader = new Panel
+            {
+                Dock = DockStyle.Bottom,
+                Height = 36,
+                BackColor = Color.FromArgb(31, 33, 34),
+                Padding = new Padding(14, 0, 14, 0)
+            };
+            Label valueHeader = new Label
+            {
+                Text = "Value",
+                Dock = DockStyle.Left,
+                Width = 66,
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = Color.FromArgb(210, 214, 213),
+                Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold)
+            };
+            Label statusHeader = new Label
+            {
+                Text = "Status",
+                Dock = DockStyle.Right,
+                Width = 110,
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = Color.FromArgb(210, 214, 213),
+                Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold)
+            };
+            tableHeader.Paint += delegate(object sender, PaintEventArgs e)
+            {
+                using (Pen pen = new Pen(Color.FromArgb(82, 86, 86), 1F))
+                {
+                    e.Graphics.DrawLine(pen, 0, tableHeader.Height - 1, tableHeader.ClientSize.Width, tableHeader.Height - 1);
+                    e.Graphics.DrawLine(pen, 0, 0, tableHeader.ClientSize.Width, 0);
+                }
+            };
+            tableHeader.Controls.Add(statusHeader);
+            tableHeader.Controls.Add(valueHeader);
+            header.Controls.Add(tableHeader);
+
+            serverLogsGrid = new DataGridView
             {
                 Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(20, 20, 20),
-                ForeColor = Color.White,
+                BackgroundColor = Color.FromArgb(20, 20, 20),
                 BorderStyle = BorderStyle.None,
+                CellBorderStyle = DataGridViewCellBorderStyle.None,
+                ColumnHeadersVisible = false,
+                RowHeadersVisible = false,
+                AllowUserToAddRows = false,
+                AllowUserToDeleteRows = false,
+                AllowUserToResizeRows = false,
+                AllowUserToResizeColumns = false,
+                AutoGenerateColumns = false,
+                MultiSelect = false,
                 ReadOnly = true,
-                Font = new Font("Consolas", 9F),
-                DetectUrls = false,
-                ScrollBars = RichTextBoxScrollBars.ForcedVertical,
-                Margin = new Padding(18),
-                Name = "serverLogsRichTextBox"
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                EnableHeadersVisualStyles = false,
+                RowTemplate = { Height = 30 },
+                Name = "serverLogsGrid"
             };
-            serverLogsTabPage.Controls.Add(serverLogsRichTextBox);
+            serverLogsGrid.DefaultCellStyle.BackColor = Color.FromArgb(20, 20, 20);
+            serverLogsGrid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(20, 20, 20);
+            serverLogsGrid.DefaultCellStyle.SelectionForeColor = Color.White;
+            serverLogsGrid.DefaultCellStyle.Font = new Font("Consolas", 9F);
+            serverLogsGrid.DefaultCellStyle.Padding = new Padding(14, 0, 8, 0);
+            serverLogsGrid.RowTemplate.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleLeft;
+
+            DataGridViewTextBoxColumn valueColumn = new DataGridViewTextBoxColumn
+            {
+                Name = "Value",
+                HeaderText = "Value",
+                AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
+                MinimumWidth = 160,
+                SortMode = DataGridViewColumnSortMode.NotSortable
+            };
+            DataGridViewTextBoxColumn statusColumn = new DataGridViewTextBoxColumn
+            {
+                Name = "Status",
+                HeaderText = "Status",
+                Width = 110,
+                SortMode = DataGridViewColumnSortMode.NotSortable
+            };
+            serverLogsGrid.Columns.Add(valueColumn);
+            serverLogsGrid.Columns.Add(statusColumn);
+            serverLogsGrid.CellPainting += delegate(object sender, DataGridViewCellPaintingEventArgs e)
+            {
+                if (e.RowIndex >= 0 && e.ColumnIndex == 1)
+                    e.PaintBackground(e.CellBounds, false);
+            };
+            serverLogsGrid.SelectionChanged += delegate { serverLogsGrid.ClearSelection(); };
+
+            serverLogsTabPage.Controls.Add(serverLogsGrid);
             serverLogsTabPage.Controls.Add(header);
         }
 
@@ -4965,7 +5057,6 @@ namespace ZeroTrace_Security_Official
                 };
             }
 
-            LogServerEvent(CommandLabel(command) + " command sent", LogType.Success);
             Task.Run(delegate
             {
                 Thread.Sleep(4000);
@@ -4981,13 +5072,19 @@ namespace ZeroTrace_Security_Official
         private void CompletePendingCommand(string connectionId, string command, bool acknowledged)
         {
             string key = connectionId + "|" + command.ToUpperInvariant();
+            bool wasPending;
             lock (connectionStateLock)
             {
-                pendingCommands.Remove(key);
+                wasPending = pendingCommands.Remove(key);
             }
 
+            // A timeout or disconnect may already have produced the final result.
+            // Ignore any late acknowledgement so Server Logs contains one row per command.
+            if (!wasPending)
+                return;
+
             if (acknowledged)
-                LogServerEvent(CommandLabel(command) + " command: ACK received", LogType.Warning);
+                LogServerEvent(CommandLabel(command) + " command succeeded", LogType.Success);
             else
                 LogServerEvent(CommandLabel(command) + " command failed: agent returned an error", LogType.Error);
         }

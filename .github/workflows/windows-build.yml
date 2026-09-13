@@ -203,8 +203,16 @@ jobs:
           if ($blockedText -match 'XDocument|XElement|XmlDocument|XmlSerializer|System\.Xml') { throw 'Blocked connection persistence contains legacy XML APIs.' }
           if ($formText -notmatch 'HELLO:FINGERPRINT:' -or $formText -notmatch 'BlockedConnectionStore') { throw 'Fingerprint handshake/blocking server flow is missing.' }
           if ($formText -notmatch 'Fingerprint') { throw 'Fingerprint connection field is missing.' }
+          if ($agentSourceText -match 'COMMANDS[^\r\n]*BLOCK|command\s*==\s*["'']BLOCK["'']') { throw 'BLOCK must remain a server-side action and must not be registered by ztsec_agent.py.' }
+          if ($agentSourceText -notmatch 'RETRY_DELAY_SECONDS\s*=\s*5\.0') { throw 'Agent retry delay must remain fixed at 5 seconds.' }
+          if ($formText -notmatch 'serverLogsGrid') { throw 'Server Logs Value/Status grid is missing.' }
+          if ($formText -match 'command sent') { throw 'Server Logs must not record intermediate command-sent events.' }
+          if ($formText -match 'ACK received') { throw 'Server Logs must not record raw ACK events; only the final command result is allowed.' }
+          if ($formText -notmatch 'command succeeded') { throw 'Successful commands must produce a final command-result log entry.' }
+          if ($formText -notmatch 'ACK not received') { throw 'Commands without an acknowledgement must produce a final warning result.' }
+          if ($formText -notmatch 'serverErrorLogLock' -or $formText -notmatch 'error\.log' -or $formText -notmatch 'File\.AppendAllText') { throw 'Server errors must be appended to the server error.log file.' }
 
-          foreach ($command in @('SLEEP','HIBERNATE','RESTART','SHUTDOWN','CLOSE','RECONNECT','BLOCK')) {
+          foreach ($command in @('SLEEP','HIBERNATE','RESTART','SHUTDOWN','CLOSE','RECONNECT')) {
             if ($agentSourceText -notmatch [regex]::Escape($command)) { throw "Agent command is missing: $command" }
           }
 

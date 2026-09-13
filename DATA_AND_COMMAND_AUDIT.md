@@ -18,7 +18,7 @@ Panel → agent commands:
 - `CMD:SHUTDOWN`
 - `CMD:CLOSE`
 - `CMD:RECONNECT`
-- `CMD:BLOCK`
+- `BLOCK` is server-side only; `ztsec_agent.py` does not register or acknowledge a BLOCK command.
 
 Agent acknowledgements:
 

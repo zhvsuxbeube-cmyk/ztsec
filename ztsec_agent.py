@@ -30,8 +30,8 @@ PROTOCOL_VERSION = "Python-StdLib/1"
 DEFAULT_IP = "127.0.0.1"
 DEFAULT_PORT = 4793
 HEARTBEAT_SECONDS = 3
-MAX_BACKOFF_SECONDS = 30
-COMMANDS = {"SLEEP", "HIBERNATE", "RESTART", "SHUTDOWN", "CLOSE", "RECONNECT", "BLOCK"}
+RETRY_DELAY_SECONDS = 5.0
+COMMANDS = {"SLEEP", "HIBERNATE", "RESTART", "SHUTDOWN", "CLOSE", "RECONNECT"}
 
 
 _STATIC_TELEMETRY_LOCK = threading.Lock()
@@ -86,11 +86,6 @@ def _handle_command(command, writer, stop_event):
 
     if command == "RECONNECT":
         _send_command_ack(writer, command)
-        return True, True
-
-    if command == "BLOCK":
-        _send_command_ack(writer, command)
-        stop_event.set()
         return True, True
 
     if command in {"SLEEP", "HIBERNATE", "RESTART", "SHUTDOWN"}:
@@ -555,7 +550,6 @@ def collect_telemetry(index, target_ip, target_port, ping_ms=None):
 
 async def run_connection_async(index, host, port, stop_event):
     """Maintain one connection without allocating a dedicated OS thread."""
-    backoff = 1.0
     while not stop_event.is_set():
         reader = None
         writer = None
@@ -570,7 +564,6 @@ async def run_connection_async(index, host, port, stop_event):
             writer.write(f"DATA:{record}\n".encode("utf-8"))
             await writer.drain()
 
-            backoff = 1.0
             while not stop_event.is_set():
                 try:
                     raw_line = await asyncio.wait_for(reader.readline(), timeout=HEARTBEAT_SECONDS)
@@ -601,7 +594,7 @@ async def run_connection_async(index, host, port, stop_event):
                         continue
         except (ConnectionError, OSError, asyncio.TimeoutError) as exc:
             if not stop_event.is_set():
-                print(f"[{index}] connection error: {exc}; retrying in {backoff:.0f}s", file=sys.stderr)
+                print(f"[{index}] connection error: {exc}; retrying in {RETRY_DELAY_SECONDS:.0f}s", file=sys.stderr)
         finally:
             if writer is not None:
                 writer.close()
@@ -613,10 +606,9 @@ async def run_connection_async(index, host, port, stop_event):
         if stop_event.is_set():
             break
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=backoff)
+            await asyncio.wait_for(stop_event.wait(), timeout=RETRY_DELAY_SECONDS)
         except asyncio.TimeoutError:
             pass
-        backoff = min(backoff * 2.0, MAX_BACKOFF_SECONDS)
 
 
 def parse_args():

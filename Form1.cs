@@ -2061,26 +2061,25 @@ namespace ZeroTrace_Security_Official
 
                     if (countryColumnIndex >= 0)
                     {
-                        // Group by country in one pass
-                        var query = clientsTable.AsEnumerable()
-                            .GroupBy(row => row.Field<string>(countryColumnIndex).Trim())
-                            .Select(g => new { Country = g.Key, Count = g.Count() });
-
-                        // Process the grouped results
-                        foreach (var group in query)
+                        // Count country values directly from the DataTable to avoid
+                        // DataSetExtensions APIs that expose XML-linked framework types.
+                        foreach (DataRow row in clientsTable.Rows)
                         {
-                            string country = group.Country;
-                            int count = group.Count;
+                            string country = Convert.ToString(row[countryColumnIndex], System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
+                            country = country.Trim();
 
-                            // Check if this is a tracked country
+                            if (string.IsNullOrWhiteSpace(country))
+                            {
+                                country = "Other";
+                            }
+
                             if (countryCounts.ContainsKey(country))
                             {
-                                countryCounts[country] = count;
+                                countryCounts[country]++;
                             }
                             else
                             {
-                                // Add to "Other" count
-                                countryCounts["Other"] += count;
+                                countryCounts["Other"]++;
                             }
                         }
                     }

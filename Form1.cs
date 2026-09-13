@@ -4257,12 +4257,6 @@ namespace ZeroTrace_Security_Official
                 MenuDrawMode = DevExpress.XtraBars.MenuDrawMode.SmallImagesText
             };
 
-            // Give menu links a little more breathing room horizontally and vertically.
-            // These are the documented BarManager link indents and apply consistently
-            // to the popup's top-level items and their nested submenus.
-            fluentFormDefaultManager1.BarItemHorzIndent = 4;
-            fluentFormDefaultManager1.BarItemVertIndent = 2;
-
             ConfigureConnectionMenuItems();
             connectionsContextMenu.Opening += connectionsContextMenu_Opening;
             ApplyContextMenuToControlTree(xtraTabPage1, connectionsContextMenu);

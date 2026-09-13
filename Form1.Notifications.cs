@@ -323,7 +323,7 @@ namespace ZeroTrace_Security_Official
         {
             CheckBox toggle = new CheckBox
             {
-                Appearance = Appearance.Button,
+                Appearance = System.Windows.Forms.Appearance.Button,
                 AutoSize = false,
                 Text = "OFF",
                 TextAlign = ContentAlignment.MiddleCenter,

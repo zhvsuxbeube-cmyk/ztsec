@@ -211,6 +211,13 @@ jobs:
           if ($formText -notmatch 'command succeeded') { throw 'Successful commands must produce a final command-result log entry.' }
           if ($formText -notmatch 'ACK not received') { throw 'Commands without an acknowledgement must produce a final warning result.' }
           if ($formText -notmatch 'serverErrorLogLock' -or $formText -notmatch 'error\.log' -or $formText -notmatch 'File\.AppendAllText') { throw 'Server errors must be appended to the server error.log file.' }
+          if ($formText -notmatch 'stream\.ReadTimeout\s*=\s*System\.Threading\.Timeout\.Infinite') { throw 'Post-handshake client reads must use Timeout.Infinite; ReadTimeout=0 is invalid on .NET Framework.' }
+          if ($formText -match 'stream\.ReadTimeout\s*=\s*0\s*;') { throw 'Invalid NetworkStream.ReadTimeout=0 remains in the server client handler.' }
+          if ($formText -notmatch 'FillWeight\s*=\s*50F') { throw 'Server Logs Value and Status columns must divide the page evenly.' }
+          if ($formText -notmatch 'blockedConnectionsPopupMenu' -or $formText -notmatch 'MinWidth = ContextParentMenuWidth') { throw 'Blocked Connections context menu must use the same popup width contract as Connections.' }
+          if ($formText -match 'Fingerprint-based access control') { throw 'Blocked Connections page must not contain the removed descriptive header.' }
+          $designerText = Get-Content -LiteralPath (Join-Path $projectRoot 'Form1.Designer.cs') -Raw
+          if ($designerText -notmatch 'textEdit1\.EditValue = "4793"') { throw 'Server Settings default port must be 4793.' }
 
           foreach ($command in @('SLEEP','HIBERNATE','RESTART','SHUTDOWN','CLOSE','RECONNECT')) {
             if ($agentSourceText -notmatch [regex]::Escape($command)) { throw "Agent command is missing: $command" }

@@ -2028,7 +2028,7 @@ namespace ZeroTrace_Security_Official
             // 
             this.textEdit1.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left) 
             | System.Windows.Forms.AnchorStyles.Right)));
-            this.textEdit1.EditValue = "8888";
+            this.textEdit1.EditValue = "4793";
             this.textEdit1.Location = new System.Drawing.Point(9, 28);
             this.textEdit1.MenuManager = this.fluentFormDefaultManager1;
             this.textEdit1.Name = "textEdit1";

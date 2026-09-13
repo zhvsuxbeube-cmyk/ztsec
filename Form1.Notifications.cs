@@ -157,20 +157,13 @@ namespace ZeroTrace_Security_Official
         // ════════════════════════════════════════════════════════════════════════
         private Panel BuildHeader()
         {
-            var header = new Panel { BackColor = NB, Height = 72 };
-
-            var accentRule = new Panel
-            {
-                BackColor = NA,
-                Size      = new Size(3, 34),
-                Location  = new Point(0, 12)
-            };
+            var header = new Panel { BackColor = NB, Height = 104 };
 
             var titleLabel = new Label
             {
                 AutoSize  = true,
-                Location  = new Point(14, 10),
-                Font      = new Font("Segoe UI", 17F, FontStyle.Bold, GraphicsUnit.Point),
+                Location  = new Point(17, 23),
+                Font      = new Font("Tahoma", 9.75F, FontStyle.Bold, GraphicsUnit.Point),
                 ForeColor = NW,
                 Text      = "Notifications"
             };
@@ -178,13 +171,12 @@ namespace ZeroTrace_Security_Official
             var subtitleLabel = new Label
             {
                 AutoSize  = true,
-                Location  = new Point(15, 44),
-                Font      = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point),
-                ForeColor = NM,
-                Text      = "Configure how ZeroTrace alerts you when a client connects"
+                Location  = new Point(18, 62),
+                Font      = new Font("Tahoma", 9.75F, FontStyle.Regular, GraphicsUnit.Point),
+                ForeColor = Color.FromArgb(224, 224, 224),
+                Text      = "Windows and Telegram"
             };
 
-            header.Controls.Add(accentRule);
             header.Controls.Add(titleLabel);
             header.Controls.Add(subtitleLabel);
             return header;

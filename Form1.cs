@@ -58,7 +58,9 @@ namespace ZeroTrace_Security_Official
         private DevExpress.XtraGrid.GridControl blockedConnectionsGrid;
         private DevExpress.XtraGrid.Views.Grid.GridView blockedConnectionsGridView;
         private DataTable blockedConnectionsTable;
-        private ContextMenuStrip blockedConnectionsContextMenu;
+        private DevExpress.XtraBars.PopupMenu blockedConnectionsPopupMenu;
+        private DevExpress.XtraBars.BarButtonItem blockedConnectionsAddItem;
+        private DevExpress.XtraBars.BarButtonItem blockedConnectionsRemoveItem;
         private System.Windows.Forms.DataGridView serverLogsGrid;
         private ContextMenuStrip connectionsContextMenu;
         private DevExpress.XtraBars.PopupMenu connectionsPopupMenu;
@@ -1042,18 +1044,40 @@ namespace ZeroTrace_Security_Official
 
         private void AppendServerSettingsLog(string message, LogType type)
         {
-            if (richTextBox1 == null)
+            if (richTextBox1 == null || IsDisposed || Disposing)
                 return;
 
-            string formatted = "[" + DateTime.Now.ToString("HH:mm:ss.fff") + "] " + message + Environment.NewLine;
-            int startIndex = richTextBox1.TextLength;
-            richTextBox1.AppendText(formatted);
-            richTextBox1.Select(startIndex, formatted.Length);
-            richTextBox1.SelectionColor = type == LogType.Error ? Color.FromArgb(235, 78, 78) :
-                (type == LogType.Warning ? Color.FromArgb(235, 196, 78) : Color.White);
-            richTextBox1.SelectionLength = 0;
-            richTextBox1.SelectionStart = richTextBox1.TextLength;
-            richTextBox1.ScrollToCaret();
+            if (InvokeRequired)
+            {
+                try
+                {
+                    if (!IsHandleCreated)
+                        return;
+                    BeginInvoke(new Action<string, LogType>(AppendServerSettingsLog), message, type);
+                }
+                catch (InvalidOperationException) { }
+                catch (ObjectDisposedException) { }
+                return;
+            }
+
+            try
+            {
+                if (!richTextBox1.IsHandleCreated || richTextBox1.IsDisposed || richTextBox1.Disposing)
+                    return;
+
+                string formatted = "[" + DateTime.Now.ToString("HH:mm:ss.fff") + "] " + message + Environment.NewLine;
+                int startIndex = richTextBox1.TextLength;
+                richTextBox1.AppendText(formatted);
+                richTextBox1.Select(startIndex, formatted.Length);
+                richTextBox1.SelectionColor = type == LogType.Error ? Color.FromArgb(235, 78, 78) :
+                    (type == LogType.Warning ? Color.FromArgb(235, 196, 78) : Color.White);
+                richTextBox1.SelectionLength = 0;
+                richTextBox1.SelectionStart = richTextBox1.TextLength;
+                richTextBox1.ScrollToCaret();
+            }
+            catch (InvalidOperationException) { }
+            catch (ObjectDisposedException) { }
+            catch (System.ComponentModel.Win32Exception) { }
         }
 
         private void ProcessLogQueue(object sender, EventArgs e)
@@ -2786,7 +2810,7 @@ namespace ZeroTrace_Security_Official
                         connectedClients[connectionId] = tcpClient;
                     }
 
-                    stream.ReadTimeout = 0;
+                    stream.ReadTimeout = System.Threading.Timeout.Infinite;
                     line = null;
                     // Do not use TcpClient.Connected here. It is not an authoritative
                     // live-state check; EOF or a socket exception is the actual signal.
@@ -4156,62 +4180,65 @@ namespace ZeroTrace_Security_Official
                 Dock = DockStyle.Top,
                 Height = 104,
                 BackColor = Color.FromArgb(38, 38, 38),
-                Padding = new Padding(24, 14, 24, 0)
+                Padding = new Padding(0)
             };
             Label title = new Label
             {
                 Text = "Server Logs",
                 AutoSize = true,
                 ForeColor = Color.White,
-                Font = new Font("Segoe UI Semibold", 15F, FontStyle.Bold),
-                Location = new Point(24, 12)
+                Font = new Font("Tahoma", 9.75F, FontStyle.Bold),
+                Location = new Point(17, 23)
             };
-            Label hint = new Label
+            Label subtitle = new Label
             {
-                Text = "Connection and command events",
+                Text = "Connection and command results",
                 AutoSize = true,
-                ForeColor = Color.FromArgb(160, 166, 165),
-                Font = new Font("Segoe UI", 8.5F),
-                Location = new Point(25, 40)
+                ForeColor = Color.FromArgb(224, 224, 224),
+                Font = new Font("Tahoma", 9.75F, FontStyle.Regular),
+                Location = new Point(18, 62)
             };
             header.Controls.Add(title);
-            header.Controls.Add(hint);
+            header.Controls.Add(subtitle);
 
             Panel tableHeader = new Panel
             {
                 Dock = DockStyle.Bottom,
                 Height = 36,
                 BackColor = Color.FromArgb(31, 33, 34),
-                Padding = new Padding(14, 0, 14, 0)
+                Padding = new Padding(0)
             };
             Label valueHeader = new Label
             {
                 Text = "Value",
                 Dock = DockStyle.Left,
-                Width = 66,
                 TextAlign = ContentAlignment.MiddleLeft,
-                ForeColor = Color.FromArgb(210, 214, 213),
-                Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold)
+                ForeColor = Color.FromArgb(224, 224, 224),
+                Font = new Font("Tahoma", 9.75F, FontStyle.Regular)
             };
             Label statusHeader = new Label
             {
                 Text = "Status",
                 Dock = DockStyle.Right,
-                Width = 110,
                 TextAlign = ContentAlignment.MiddleLeft,
-                ForeColor = Color.FromArgb(210, 214, 213),
-                Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold)
+                ForeColor = Color.FromArgb(224, 224, 224),
+                Font = new Font("Tahoma", 9.75F, FontStyle.Regular)
             };
-            tableHeader.Paint += delegate(object sender, PaintEventArgs e)
+            Panel headerDivider = new Panel
             {
-                using (Pen pen = new Pen(Color.FromArgb(82, 86, 86), 1F))
-                {
-                    e.Graphics.DrawLine(pen, 0, tableHeader.Height - 1, tableHeader.ClientSize.Width, tableHeader.Height - 1);
-                    e.Graphics.DrawLine(pen, 0, 0, tableHeader.ClientSize.Width, 0);
-                }
+                Dock = DockStyle.Bottom,
+                Height = 1,
+                BackColor = Color.FromArgb(82, 86, 86)
             };
             tableHeader.Controls.Add(statusHeader);
             tableHeader.Controls.Add(valueHeader);
+            tableHeader.Controls.Add(headerDivider);
+            tableHeader.Resize += delegate
+            {
+                int half = Math.Max(1, tableHeader.ClientSize.Width / 2);
+                valueHeader.Width = half;
+                statusHeader.Width = tableHeader.ClientSize.Width - half;
+            };
             header.Controls.Add(tableHeader);
 
             serverLogsGrid = new DataGridView
@@ -4238,7 +4265,7 @@ namespace ZeroTrace_Security_Official
             serverLogsGrid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(20, 20, 20);
             serverLogsGrid.DefaultCellStyle.SelectionForeColor = Color.White;
             serverLogsGrid.DefaultCellStyle.Font = new Font("Consolas", 9F);
-            serverLogsGrid.DefaultCellStyle.Padding = new Padding(14, 0, 8, 0);
+            serverLogsGrid.DefaultCellStyle.Padding = new Padding(14, 0, 14, 0);
             serverLogsGrid.RowTemplate.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleLeft;
 
             DataGridViewTextBoxColumn valueColumn = new DataGridViewTextBoxColumn
@@ -4246,22 +4273,38 @@ namespace ZeroTrace_Security_Official
                 Name = "Value",
                 HeaderText = "Value",
                 AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
-                MinimumWidth = 160,
+                FillWeight = 50F,
+                MinimumWidth = 120,
                 SortMode = DataGridViewColumnSortMode.NotSortable
             };
             DataGridViewTextBoxColumn statusColumn = new DataGridViewTextBoxColumn
             {
                 Name = "Status",
                 HeaderText = "Status",
-                Width = 110,
+                AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
+                FillWeight = 50F,
+                MinimumWidth = 120,
                 SortMode = DataGridViewColumnSortMode.NotSortable
             };
             serverLogsGrid.Columns.Add(valueColumn);
             serverLogsGrid.Columns.Add(statusColumn);
             serverLogsGrid.CellPainting += delegate(object sender, DataGridViewCellPaintingEventArgs e)
             {
-                if (e.RowIndex >= 0 && e.ColumnIndex == 1)
-                    e.PaintBackground(e.CellBounds, false);
+                if (e.RowIndex < 0 || e.ColumnIndex < 0)
+                    return;
+
+                e.PaintBackground(e.CellBounds, false);
+                string text = Convert.ToString(e.FormattedValue) ?? string.Empty;
+                Rectangle textRect = new Rectangle(
+                    e.CellBounds.X + 14,
+                    e.CellBounds.Y + 1,
+                    Math.Max(0, e.CellBounds.Width - 28),
+                    Math.Max(0, e.CellBounds.Height - 2));
+                TextFormatFlags flags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
+                    TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis;
+                Color foreColor = e.CellStyle.ForeColor.IsEmpty ? Color.White : e.CellStyle.ForeColor;
+                TextRenderer.DrawText(e.Graphics, text, serverLogsGrid.Font, textRect, foreColor, flags);
+                e.Handled = true;
             };
             serverLogsGrid.SelectionChanged += delegate { serverLogsGrid.ClearSelection(); };
 
@@ -4273,32 +4316,7 @@ namespace ZeroTrace_Security_Official
         {
             blockedConnectionsTabPage.Text = "Blocked Connections";
             blockedConnectionsTabPage.BackColor = ColorTranslator.FromHtml("#262626");
-
-            Panel header = new Panel
-            {
-                Dock = DockStyle.Top,
-                Height = 74,
-                BackColor = Color.FromArgb(38, 38, 38),
-                Padding = new Padding(24, 16, 24, 8)
-            };
-            Label title = new Label
-            {
-                Text = "Blocked Connections",
-                AutoSize = true,
-                ForeColor = Color.White,
-                Font = new Font("Segoe UI Semibold", 15F, FontStyle.Bold),
-                Location = new Point(24, 12)
-            };
-            Label hint = new Label
-            {
-                Text = "Fingerprint-based access control",
-                AutoSize = true,
-                ForeColor = Color.FromArgb(160, 166, 165),
-                Font = new Font("Segoe UI", 8.5F),
-                Location = new Point(25, 40)
-            };
-            header.Controls.Add(title);
-            header.Controls.Add(hint);
+            blockedConnectionsTabPage.Padding = new Padding(0);
 
             blockedConnectionsGrid = new DevExpress.XtraGrid.GridControl
             {
@@ -4313,6 +4331,7 @@ namespace ZeroTrace_Security_Official
             blockedConnectionsGridView.OptionsSelection.EnableAppearanceFocusedRow = true;
             blockedConnectionsGridView.OptionsView.ShowGroupPanel = false;
             blockedConnectionsGridView.OptionsView.ColumnAutoWidth = false;
+            blockedConnectionsGridView.RowHeight = 32;
             blockedConnectionsGridView.RowStyle += delegate(object sender, DevExpress.XtraGrid.Views.Grid.RowStyleEventArgs e)
             {
                 if (e.RowHandle >= 0 && blockedConnectionsGridView.IsRowSelected(e.RowHandle))
@@ -4329,26 +4348,36 @@ namespace ZeroTrace_Security_Official
             blockedConnectionsTable.Columns.Add("Fingerprint", typeof(string));
             blockedConnectionsGrid.DataSource = blockedConnectionsTable;
 
-            blockedConnectionsContextMenu = new ContextMenuStrip
+            blockedConnectionsPopupMenu = new DevExpress.XtraBars.PopupMenu(fluentFormDefaultManager1)
             {
-                Name = "blockedConnectionsContextMenu",
-                ShowImageMargin = false,
-                ShowCheckMargin = false,
-                BackColor = Color.FromArgb(26, 26, 26),
-                ForeColor = Color.White,
-                Font = new Font("Segoe UI", 9F)
+                Name = "blockedConnectionsPopupMenu",
+                MinWidth = ContextParentMenuWidth
             };
-            ToolStripMenuItem addItem = new ToolStripMenuItem("Add");
-            ToolStripMenuItem removeItem = new ToolStripMenuItem("Remove");
-            addItem.Click += delegate { ShowAddBlockedFingerprintDialog(); };
-            removeItem.Click += delegate { RemoveSelectedBlockedConnection(); };
-            blockedConnectionsContextMenu.Items.Add(addItem);
-            blockedConnectionsContextMenu.Items.Add(removeItem);
-            blockedConnectionsGrid.ContextMenuStrip = blockedConnectionsContextMenu;
+            blockedConnectionsAddItem = new DevExpress.XtraBars.BarButtonItem(fluentFormDefaultManager1, "Add")
+            {
+                PaintStyle = DevExpress.XtraBars.BarItemPaintStyle.Caption
+            };
+            blockedConnectionsRemoveItem = new DevExpress.XtraBars.BarButtonItem(fluentFormDefaultManager1, "Remove")
+            {
+                PaintStyle = DevExpress.XtraBars.BarItemPaintStyle.Caption
+            };
+            blockedConnectionsAddItem.ImageOptions.Image = null;
+            blockedConnectionsAddItem.ImageOptions.SvgImage = null;
+            blockedConnectionsRemoveItem.ImageOptions.Image = null;
+            blockedConnectionsRemoveItem.ImageOptions.SvgImage = null;
+            blockedConnectionsAddItem.ItemClick += delegate { ShowAddBlockedFingerprintDialog(); };
+            blockedConnectionsRemoveItem.ItemClick += delegate { RemoveSelectedBlockedConnection(); };
+            blockedConnectionsPopupMenu.AddItem(blockedConnectionsAddItem);
+            blockedConnectionsPopupMenu.AddItem(blockedConnectionsRemoveItem);
+
             blockedConnectionsGrid.MouseDown += BlockedConnectionsGrid_MouseDown;
+            blockedConnectionsGrid.MouseUp += delegate(object sender, MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Right && blockedConnectionsPopupMenu != null)
+                    blockedConnectionsPopupMenu.ShowPopup(Control.MousePosition);
+            };
 
             blockedConnectionsTabPage.Controls.Add(blockedConnectionsGrid);
-            blockedConnectionsTabPage.Controls.Add(header);
             ReloadBlockedConnectionsGrid();
         }
 
@@ -4387,17 +4416,17 @@ namespace ZeroTrace_Security_Official
                 if (blockedConnectionsGridView.Columns["IP"] != null)
                 {
                     blockedConnectionsGridView.Columns["IP"].Caption = "IP Address";
-                    blockedConnectionsGridView.Columns["IP"].Width = 140;
+                    blockedConnectionsGridView.Columns["IP"].Width = 180;
                 }
                 if (blockedConnectionsGridView.Columns["UserName"] != null)
                 {
                     blockedConnectionsGridView.Columns["UserName"].Caption = "User Name";
-                    blockedConnectionsGridView.Columns["UserName"].Width = 180;
+                    blockedConnectionsGridView.Columns["UserName"].Width = 240;
                 }
                 if (blockedConnectionsGridView.Columns["Fingerprint"] != null)
                 {
                     blockedConnectionsGridView.Columns["Fingerprint"].Caption = "Fingerprint";
-                    blockedConnectionsGridView.Columns["Fingerprint"].Width = 360;
+                    blockedConnectionsGridView.Columns["Fingerprint"].Width = 420;
                 }
             }
         }

@@ -99,16 +99,24 @@ namespace ZeroTrace_Security_Official
             try
             {
                 Directory.CreateDirectory(BaseDirectory);
+                string stamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
+                string details = exception == null ? string.Empty : exception.ToString();
                 using (StreamWriter writer = new StreamWriter(StartupLogPath, true))
                 {
                     writer.WriteLine("============================================================");
-                    writer.WriteLine(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"));
+                    writer.WriteLine(stamp);
                     writer.WriteLine(context);
                     writer.WriteLine("Application base: " + BaseDirectory);
                     writer.WriteLine("Runtime: " + Environment.Version);
-                    if (exception != null)
-                        writer.WriteLine(exception);
+                    if (!string.IsNullOrEmpty(details))
+                        writer.WriteLine(details);
                     writer.WriteLine();
+                }
+                string errorLogPath = Path.Combine(BaseDirectory, "error.log");
+                using (StreamWriter writer = new StreamWriter(errorLogPath, true))
+                {
+                    writer.WriteLine("[" + stamp + "] " + context +
+                        (string.IsNullOrEmpty(details) ? string.Empty : ": " + details));
                 }
             }
             catch

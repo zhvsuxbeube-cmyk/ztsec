@@ -1,0 +1,19 @@
+# Visual Studio / MSBuild
+.vs/
+bin/
+obj/
+*.user
+*.suo
+
+# CI-generated dependency staging / Windows package output
+.ci-dependency-input/
+windows-package/
+ZTSecurity-Windows-Release.zip
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# OS metadata
+.DS_Store
+Thumbs.db

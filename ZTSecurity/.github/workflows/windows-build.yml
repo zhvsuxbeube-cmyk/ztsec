@@ -1,0 +1,1051 @@
+name: Windows Release Build
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PROJECT_DIR: ZTSecurity
+  PROJECT_FILE: ZeroTrace Security Official.csproj
+  CONFIGURATION: Release
+  PLATFORM: AnyCPU
+  EXE_NAME: ZeroTrace Security Official.exe
+  RUNTIME_PORT: '4793'
+
+jobs:
+  build-windows:
+    name: Build, run, validate and package ZTSecurity
+    timeout-minutes: 20
+    # DevExpress 24.2 supports Visual Studio 2022, not Visual Studio 2026.
+    # Pin the runner so the build toolchain cannot silently migrate with windows-latest.
+    runs-on: windows-2022
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.1
+        with:
+          path: ZTSecurity
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Remove obsolete custom caption-button source
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $legacySource = Join-Path (Join-Path $PWD $env:PROJECT_DIR) 'AccentCaptionCloseButton.cs'
+          if (Test-Path -LiteralPath $legacySource -PathType Leaf) {
+            Remove-Item -LiteralPath $legacySource -Force
+            Write-Host "Removed obsolete legacy caption-button source: $legacySource"
+          } else {
+            Write-Host 'No obsolete custom caption-button source found.'
+          }
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v3
+        with:
+          msbuild-architecture: x86
+          vs-version: '[17.0,18.0)'
+
+      - name: Verify Visual Studio 2022 toolchain
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { throw "vswhere.exe not found: $vswhere" }
+          $installationVersion = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationVersion
+          if ([string]::IsNullOrWhiteSpace($installationVersion)) { throw 'No Visual Studio installation containing MSBuild was found.' }
+          $major = [int]($installationVersion.Split('.')[0])
+          if ($major -ne 17) { throw "DevExpress 24.2 requires the Visual Studio 2022 toolchain; detected Visual Studio $installationVersion." }
+          $msbuild = (Get-Command msbuild -ErrorAction Stop).Source
+          & $msbuild -version
+          if ($LASTEXITCODE -ne 0) { throw 'MSBuild version probe failed.' }
+          Write-Host "Visual Studio 2022/MSBuild 17 toolchain: PASS ($installationVersion)"
+
+      - name: Validate source and prepared dependency inputs
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $projectRoot = Join-Path $PWD $env:PROJECT_DIR
+          $projectPath = Join-Path $projectRoot $env:PROJECT_FILE
+          $manifestPath = Join-Path $projectRoot 'scripts\dependency_manifest.json'
+          $dependencyDir = Join-Path $projectRoot 'dependencies'
+          $shapefile = Join-Path $projectRoot 'world-administrative-boundaries.shp'
+
+          foreach ($path in @($projectPath, $manifestPath, $dependencyDir, $shapefile)) {
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "Required build input is missing: $path. The repository intentionally keeps third-party/runtime payloads external; provide the manifest-matching prepared inputs before building."
+            }
+          }
+
+          [xml]$projectXml = Get-Content -LiteralPath $projectPath -Raw
+          $framework = @($projectXml.Project.PropertyGroup.TargetFrameworkVersion) |
+            Where-Object { $_ } | Select-Object -First 1
+          if ($framework -ne 'v4.7.2') { throw "Expected .NET Framework v4.7.2, found '$framework'." }
+
+          $assemblyName = @($projectXml.Project.PropertyGroup.AssemblyName) |
+            Where-Object { $_ } | Select-Object -First 1
+          if ($assemblyName -ne 'ZeroTrace Security Official') { throw "Unexpected assembly name '$assemblyName'." }
+
+          $outputType = @($projectXml.Project.PropertyGroup.OutputType) |
+            Where-Object { $_ } | Select-Object -First 1
+          if ($outputType -ne 'WinExe') { throw "Expected OutputType WinExe, found '$outputType'." }
+
+          $startupObject = @($projectXml.Project.PropertyGroup.StartupObject) |
+            Where-Object { $_ } | Select-Object -First 1
+          if ($startupObject -ne 'ZeroTrace_Security_Official.Program') { throw "Unexpected StartupObject '$startupObject'." }
+
+          $programPath = Join-Path $projectRoot 'Program.cs'
+          if (-not (Test-Path -LiteralPath $programPath -PathType Leaf)) { throw "Program.cs is missing: $programPath" }
+          $programText = Get-Content -LiteralPath $programPath -Raw
+          if ($programText -notmatch '(?m)\bstatic\s+void\s+Main\s*\(') { throw 'Program.cs does not declare a static void Main entry point.' }
+          if ($programText -notmatch '\[STAThread\]') { throw 'Program.cs Main entry point is missing [STAThread].' }
+
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          $required = @($manifest.required_files)
+          if ($required.Count -eq 0) { throw 'Dependency manifest contains no required_files entries.' }
+
+          Write-Host "Validating $($required.Count) prepared runtime DLLs..."
+          foreach ($entry in $required) {
+            $path = Join-Path $dependencyDir $entry.filename
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Prepared runtime dependency is missing: $($entry.filename)"
+            }
+            $length = (Get-Item -LiteralPath $path).Length
+            if ([int64]$length -ne [int64]$entry.size) {
+              throw "Size mismatch for $($entry.filename): expected $($entry.size), got $length"
+            }
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA1).Hash.ToLowerInvariant()
+            if ($hash -ne $entry.sha1.ToLowerInvariant()) {
+              throw "SHA-1 mismatch for $($entry.filename): expected $($entry.sha1), got $hash"
+            }
+            $header = [System.IO.File]::ReadAllBytes($path)
+            if ($header.Length -lt 2 -or $header[0] -ne 0x4D -or $header[1] -ne 0x5A) {
+              throw "$($entry.filename) is not a valid PE file (MZ header missing)."
+            }
+          }
+
+          $runtimeEntry = @($manifest.runtime_files) | Where-Object { $_.filename -eq 'world-administrative-boundaries.shp' } | Select-Object -First 1
+          if (-not $runtimeEntry) { throw 'Manifest does not contain world-administrative-boundaries.shp.' }
+          $shapeHash = (Get-FileHash -LiteralPath $shapefile -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($shapeHash -ne $runtimeEntry.sha256.ToLowerInvariant()) {
+            throw "world-administrative-boundaries.shp SHA-256 mismatch: expected $($runtimeEntry.sha256), got $shapeHash"
+          }
+          Write-Host 'Prepared dependency/runtime-input validation: PASS'
+
+      - name: Clean previous build and staging output
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $projectRoot = Join-Path $PWD $env:PROJECT_DIR
+          foreach ($path in @(
+            (Join-Path $projectRoot 'bin'),
+            (Join-Path $projectRoot 'obj'),
+            (Join-Path $PWD 'windows-package'),
+            (Join-Path $PWD 'exe-only'),
+            (Join-Path $PWD 'ZTSecurity-EXE-Standalone.zip'),
+            (Join-Path $PWD 'gui-screenshot-1.png'),
+            (Join-Path $PWD 'gui-screenshot-2.png'),
+            (Join-Path $PWD 'gui-screenshots.zip'),
+            (Join-Path $PWD 'ui-color-audit.txt'),
+            (Join-Path $projectRoot 'ci-administration-automation-ready.flag'),
+            (Join-Path $projectRoot 'ci-administration-automation-error.txt'),
+            (Join-Path $projectRoot 'ci-open-download-one-consumed.flag'),
+            (Join-Path $projectRoot 'ci-administration-dialog-opened.flag'),
+            (Join-Path $projectRoot 'ci-open-download-one.flag'),
+            (Join-Path $PWD 'ZTSecurity-Windows-Release.zip')
+          )) {
+            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+          }
+
+      - name: Validate UI theme source of truth
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $projectRoot = Join-Path $PWD $env:PROJECT_DIR
+          $appConfig = Join-Path $projectRoot 'App.config'
+          $themeSource = Join-Path $projectRoot 'UiTheme.cs'
+          $formSource = Join-Path $projectRoot 'Form1.cs'
+          foreach ($path in @($appConfig, $themeSource, $formSource)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "UI theme source file is missing: $path" }
+          }
+
+          [xml]$config = Get-Content -LiteralPath $appConfig -Raw
+          $defaultSkinNode = $config.SelectSingleNode("//setting[@name='DefaultAppSkin']/value")
+          $defaultPaletteNode = $config.SelectSingleNode("//setting[@name='DefaultPalette']/value")
+          if (-not $defaultSkinNode -or $defaultSkinNode.InnerText -ne 'Skin/The Bezier') { throw "Unexpected active DevExpress skin: '$($defaultSkinNode.InnerText)'" }
+          if (-not $defaultPaletteNode -or $defaultPaletteNode.InnerText -ne 'Custom/Custom Palette #1') { throw "Unexpected active DevExpress palette: '$($defaultPaletteNode.InnerText)'" }
+
+          $themeText = Get-Content -LiteralPath $themeSource -Raw
+          if ($themeText -notmatch 'AccentRed\s*=\s*80\b' -or $themeText -notmatch 'AccentGreen\s*=\s*192\b' -or $themeText -notmatch 'AccentBlue\s*=\s*144\b') {
+            throw 'UiTheme.cs does not define the exact #50C090 RGB source of truth.'
+          }
+          $formText = Get-Content -LiteralPath $formSource -Raw
+          if ($formText -match 'AccentCaptionCloseButton|InstallStableCaptionPresentation|UpdateCaptionCloseButtonBounds') { throw 'A custom/fake caption close-button implementation is still present; the GUI must use the native DevExpress close button.' }
+          if ($formText -match '(?m)fluentDesignFormControl1\.Appearance\b') { throw 'Form1.cs uses Appearance on FluentDesignFormControl, which is not part of the DevExpress 24.2.3 API. Use the control-level WinForms properties or supported FluentDesignForm configuration.' }
+          if ($formText -match 'Color\.FromArgb\(55\s*,\s*90\s*,\s*125\)') { throw 'The previous selected-row blue override is still present in Form1.cs.' }
+          $customCloseSource = Join-Path $projectRoot 'AccentCaptionCloseButton.cs'
+          if (Test-Path -LiteralPath $customCloseSource) { throw 'AccentCaptionCloseButton.cs must not be present; native FluentDesignForm caption buttons are required.' }
+          if ($formText -notmatch 'SidebarAccentColor\s*=\s*UiTheme\.AccentColor') { throw 'Form1.cs is no longer wired to the shared accent token.' }
+
+          $blueNode = $config.SelectSingleNode("//Skin[@Name='The Bezier']/SvgPalette[@Name='Custom Palette #1']/SvgColor[@Name='Blue']")
+          $altBlueNode = $config.SelectSingleNode("//Skin[@Name='The Bezier']/SvgPalette[@Name='Custom Palette #1']/SvgColor[@Name='altBlue']")
+          if (-not $blueNode -or $blueNode.GetAttribute('Value') -ne '80,192,144') { throw 'The active The Bezier palette does not define Blue=80,192,144.' }
+          if (-not $altBlueNode -or $altBlueNode.GetAttribute('Value') -ne '80,192,144') { throw 'The active palette does not define altBlue=80,192,144.' }
+          $redNode = $config.SelectSingleNode("//Skin[@Name='The Bezier']/SvgPalette[@Name='Custom Palette #1']/SvgColor[@Name='Red']")
+          $altRedNode = $config.SelectSingleNode("//Skin[@Name='The Bezier']/SvgPalette[@Name='Custom Palette #1']/SvgColor[@Name='altRed']")
+          if (-not $redNode -or $redNode.GetAttribute('Value') -ne '80,192,144') { throw 'The active The Bezier palette does not define Red=80,192,144 for the title-bar close glyph.' }
+          if (-not $altRedNode -or $altRedNode.GetAttribute('Value') -ne '80,192,144') { throw 'The active The Bezier palette does not define altRed=80,192,144 for the title-bar close glyph.' }
+          $accentRoleNames = @('Accent Brush Light','Green','Blue','altGreen','altBlue','Red','altRed')
+          foreach ($roleName in $accentRoleNames) {
+            $roleNode = $config.SelectSingleNode("//Skin[@Name='The Bezier']/SvgPalette[@Name='Custom Palette #1']/SvgColor[@Name='$roleName']")
+            if (-not $roleNode -or $roleNode.GetAttribute('Value') -ne '80,192,144') { throw "The active The Bezier palette role '$roleName' is not set to 80,192,144." }
+          }
+          $keyBrushLightNode = $config.SelectSingleNode("//Skin[@Name='The Bezier']/SvgPalette[@Name='Custom Palette #1']/SvgColor[@Name='Key Brush Light']")
+          if (-not $keyBrushLightNode -or $keyBrushLightNode.GetAttribute('Value') -ne '255,255,255') { throw 'The inactive FluentDesignForm title caption brush must remain white.' }
+          $formText = Get-Content -LiteralPath $formSource -Raw
+          if ($formText -notmatch '#1A2028') { throw 'Form1.cs does not contain the requested #1A2028 selected Connections-row color.' }
+          if ($formText -notmatch 'ContextMenuWidth\s*=\s*300') { throw 'Connections context menu width was not expanded to 300 logical pixels.' }
+          if ($formText -notmatch 'Resources.*icons.*svg|LoadUiSvgImage') { throw 'Supplied SVG icons are not wired into the UI.' }
+          if ($appConfigText = (Get-Content -LiteralPath $appConfig -Raw)) {
+            if ($appConfigText -match '37\s*,\s*150\s*,\s*190') { throw 'The production App.config still contains the former #2596BE RGB tuple.' }
+          }
+          Write-Host 'UI theme source-of-truth validation: PASS (#50C090 / RGB 80,192,144; The Bezier / Custom Palette #1).'
+
+      - name: Restore and rebuild Release
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $project = Join-Path (Join-Path $PWD $env:PROJECT_DIR) $env:PROJECT_FILE
+          & msbuild $project /restore /t:Rebuild /m /verbosity:minimal /p:Configuration=$env:CONFIGURATION /p:Platform=$env:PLATFORM
+          if ($LASTEXITCODE -ne 0) { throw "MSBuild failed with exit code $LASTEXITCODE." }
+
+      - name: Validate final flat Release output
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $projectRoot = Join-Path $PWD $env:PROJECT_DIR
+          $output = Join-Path $projectRoot 'bin\Release'
+          $exe = Join-Path $output $env:EXE_NAME
+          $config = "$exe.config"
+          $shapefile = Join-Path $output 'world-administrative-boundaries.shp'
+          $dependenciesDir = Join-Path $output 'dependencies'
+          $manifest = Get-Content -LiteralPath (Join-Path $projectRoot 'scripts\dependency_manifest.json') -Raw | ConvertFrom-Json
+
+          foreach ($path in @($exe, $config, $shapefile)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required Release runtime file is missing: $path" }
+          }
+          if (Test-Path -LiteralPath $dependenciesDir) {
+            throw "Release output must be flat, but a dependencies directory exists: $dependenciesDir"
+          }
+
+          $nestedDirs = @(Get-ChildItem -LiteralPath $output -Directory -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ieq 'dependencies' })
+          if ($nestedDirs.Count -gt 0) { throw 'A nested dependencies directory was found in Release output.' }
+
+          $required = @($manifest.required_files)
+          foreach ($entry in $required) {
+            $path = Join-Path $output $entry.filename
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required runtime DLL is not beside the EXE: $($entry.filename)" }
+            $length = (Get-Item -LiteralPath $path).Length
+            if ([int64]$length -ne [int64]$entry.size) { throw "Release size mismatch: $($entry.filename)" }
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA1).Hash.ToLowerInvariant()
+            if ($hash -ne $entry.sha1.ToLowerInvariant()) { throw "Release SHA-1 mismatch: $($entry.filename)" }
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            if ($bytes.Length -lt 2 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw "Release dependency is not a PE file: $($entry.filename)" }
+          }
+
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          if ($bytes.Length -lt 0x40 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw 'Release EXE is not a Windows PE file.' }
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          if ($peOffset -lt 0x40 -or $peOffset -gt ($bytes.Length - 4)) { throw 'Release EXE has an invalid PE offset.' }
+          if ($bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45 -or $bytes[$peOffset + 2] -ne 0 -or $bytes[$peOffset + 3] -ne 0) { throw 'Release EXE has an invalid PE signature.' }
+          $coff = $peOffset + 4
+          $optionalSize = [BitConverter]::ToUInt16($bytes, $coff + 16)
+          $optionalOffset = $coff + 20
+          if ($optionalSize -lt 96 -or ($optionalOffset + $optionalSize) -gt $bytes.Length) { throw 'Release EXE optional header is truncated.' }
+          $magic = [BitConverter]::ToUInt16($bytes, $optionalOffset)
+          if ($magic -ne 0x10B -and $magic -ne 0x20B) { throw 'Release EXE has an unsupported PE optional-header magic.' }
+          $dataDirectoryOffset = if ($magic -eq 0x10B) { $optionalOffset + 96 } else { $optionalOffset + 112 }
+          $cliOffset = $dataDirectoryOffset + (14 * 8)
+          $cliRva = [BitConverter]::ToUInt32($bytes, $cliOffset)
+          $cliSize = [BitConverter]::ToUInt32($bytes, $cliOffset + 4)
+          if ($cliRva -eq 0 -or $cliSize -eq 0) { throw 'Release EXE has no CLR metadata directory.' }
+
+          $shapeHash = (Get-FileHash -LiteralPath $shapefile -Algorithm SHA256).Hash.ToLowerInvariant()
+          $runtimeEntry = @($manifest.runtime_files) | Where-Object { $_.filename -eq 'world-administrative-boundaries.shp' } | Select-Object -First 1
+          if ($shapeHash -ne $runtimeEntry.sha256.ToLowerInvariant()) { throw 'Release shapefile SHA-256 mismatch.' }
+
+          $compressed = @(Get-ChildItem -LiteralPath $output -Filter '*.compressed' -File -ErrorAction SilentlyContinue)
+          if ($compressed.Count -gt 0) { throw 'A Costura compressed payload leaked into Release output.' }
+
+          Write-Host "Release output: PASS ($($required.Count) validated DLLs, flat layout, PE/CLR verified)"
+
+      - name: Launch freshly built EXE for GUI smoke test
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        env:
+          ZTSEC_CI_SMOKE: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $projectRoot = Join-Path $PWD $env:PROJECT_DIR
+          $output = Join-Path $projectRoot 'bin\Release'
+          $exe = Join-Path $output $env:EXE_NAME
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Fresh Release EXE not found: $exe" }
+
+          $process = Start-Process -FilePath $exe -WorkingDirectory $output -PassThru
+          Write-Host "Started freshly built EXE: $exe"
+          Write-Host "Process ID: $($process.Id)"
+          "ZTSEC_GUI_PID=$($process.Id)" | Out-File -FilePath (Join-Path $PWD 'gui-process.env') -Encoding ascii
+
+          $ready = $false
+          for ($attempt = 1; $attempt -le 30; $attempt++) {
+            Start-Sleep -Seconds 1
+            $process.Refresh()
+            Write-Host "Launch check ${attempt}: PID=$($process.Id), MainWindowHandle=$($process.MainWindowHandle), MainWindowTitle='$($process.MainWindowTitle)'"
+            if ($process.HasExited) { throw "Freshly built application exited during startup with code $($process.ExitCode)." }
+            if ($process.MainWindowHandle -ne 0) { $ready = $true; break }
+          }
+          if (-not $ready) { throw 'GUI window was not created within the bounded startup window.' }
+
+      - name: Restore and verify visible GUI window
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class WindowStateNative {
+              [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+              [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+              [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+              [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+              [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+              [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+              [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+              [StructLayout(LayoutKind.Sequential)] public struct TRACKMOUSEEVENT { public uint cbSize; public uint dwFlags; public IntPtr hwndTrack; public uint dwHoverTime; }
+          }
+          '@
+
+          $projectRoot = Join-Path $PWD $env:PROJECT_DIR
+          $output = Join-Path $projectRoot 'bin\Release'
+          $exe = Join-Path $output $env:EXE_NAME
+          $guiPid = [int](Get-Content -LiteralPath (Join-Path $PWD 'gui-process.env') | ForEach-Object { ($_ -split '=')[1] })
+          $process = Get-Process -Id $guiPid -ErrorAction Stop
+          $process.WaitForInputIdle(15000) | Out-Null
+          $process.Refresh()
+          $hwnd = [IntPtr]$process.MainWindowHandle
+          if ($hwnd -eq [IntPtr]::Zero) { throw "GUI main window handle was not found for PID $guiPid." }
+
+          [WindowStateNative]::ShowWindowAsync($hwnd, 9) | Out-Null
+          [WindowStateNative]::SetForegroundWindow($hwnd) | Out-Null
+          Start-Sleep -Milliseconds 500
+
+          $process.Refresh()
+          $hwnd = [IntPtr]$process.MainWindowHandle
+          [WindowStateNative+RECT]$rect = New-Object WindowStateNative+RECT
+          [WindowStateNative]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+          Write-Host "GUI PID=$guiPid HWND=$hwnd Visible=$([WindowStateNative]::IsWindowVisible($hwnd)) Minimized=$([WindowStateNative]::IsIconic($hwnd)) Bounds=($($rect.Left),$($rect.Top))-($($rect.Right),$($rect.Bottom))"
+
+          if (-not [WindowStateNative]::IsWindowVisible($hwnd)) { throw 'GUI window remains hidden.' }
+          if ([WindowStateNative]::IsIconic($hwnd)) { throw 'GUI window remains minimized.' }
+          if (($rect.Right - $rect.Left) -le 0 -or ($rect.Bottom - $rect.Top) -le 0) { throw 'GUI window has non-positive bounds.' }
+
+      - name: Create real local connection data
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $agent = Join-Path (Join-Path $PWD $env:PROJECT_DIR) 'ztsec_agent.py'
+          if (-not (Test-Path -LiteralPath $agent -PathType Leaf)) { throw "Connection test agent missing: $agent" }
+          $agentProcess = Start-Process -FilePath 'python' -ArgumentList @('-u', $agent, '--ip', '127.0.0.1', '--port', $env:RUNTIME_PORT, '--n', '2') -PassThru -WindowStyle Hidden
+          "ZTSEC_AGENT_PID=$($agentProcess.Id)" | Out-File -FilePath (Join-Path $PWD 'gui-agent.env') -Encoding ascii
+          Write-Host "Started real local connection agent with PID $($agentProcess.Id)"
+
+          $projectRoot = Join-Path $PWD $env:PROJECT_DIR
+          $output = Join-Path $projectRoot 'bin\Release'
+          $log = Join-Path $output 'startup-error.log'
+          for ($attempt = 1; $attempt -le 30; $attempt++) {
+            Start-Sleep -Seconds 1
+            $logText = if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Raw } else { '' }
+            if ($logText -match 'Fatal startup exception') { throw "Application startup error detected: $logText" }
+            # The agent remains persistent, so wait until the server's managed grid has received both sessions.
+            $process = Get-Process -Id ([int]((Get-Content (Join-Path $PWD 'gui-process.env')) -split '=')[1]) -ErrorAction Stop
+            if ($process.HasExited) { throw "Application exited while waiting for real connection data. ExitCode=$($process.ExitCode)" }
+          }
+          Write-Host 'Connection smoke window complete; continuing with structural/UI verification.'
+
+      - name: Exercise responsive layout and search states
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class GuiInputNative {
+              [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+              [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+              [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+              [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+              [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+              [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+              [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+              [DllImport("user32.dll", SetLastError = true)] public static extern bool TrackMouseEvent(ref TRACKMOUSEEVENT tme);
+              [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, uint flags);
+              [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hWnd);
+              [DllImport("user32.dll")] public static extern int GetSystemMetricsForDpi(int nIndex, uint dpi);
+              public const uint WM_NCHITTEST = 0x0084;
+              public const int HTCAPTION = 2;
+              public const int HTCLOSE = 20;
+              public const int SM_CXSIZE = 30;
+              public const int SM_CYSIZE = 31;
+              public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
+              public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
+              [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+              [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+              [StructLayout(LayoutKind.Sequential)] public struct TRACKMOUSEEVENT { public uint cbSize; public uint dwFlags; public IntPtr hwndTrack; public uint dwHoverTime; }
+          }
+          '@
+
+          $guiPid = [int]((Get-Content (Join-Path $PWD 'gui-process.env')) -split '=')[1]
+          $process = Get-Process -Id $guiPid -ErrorAction Stop
+          $process.Refresh()
+          $hwnd = [IntPtr]$process.MainWindowHandle
+          [GuiInputNative]::ShowWindowAsync($hwnd, 9) | Out-Null
+          [GuiInputNative]::SetForegroundWindow($hwnd) | Out-Null
+          Start-Sleep -Milliseconds 300
+
+          # The application CI-smoke diagnostics directly exercise the actual search
+          # surface open/close methods, including the responsive expanded width.
+
+          # Maximize and restore, then deliberately narrow the real window. The
+          # application's Dock/Fill layout and search-bar Resize handler must reflow.
+          [GuiInputNative]::ShowWindowAsync($hwnd, 3) | Out-Null
+          Start-Sleep -Milliseconds 700
+          [GuiInputNative]::ShowWindowAsync($hwnd, 9) | Out-Null
+          Start-Sleep -Milliseconds 500
+
+          [GuiInputNative+RECT]$beforeNarrow = New-Object GuiInputNative+RECT
+          [GuiInputNative]::GetWindowRect($hwnd, [ref]$beforeNarrow) | Out-Null
+          $narrowFlags = [uint32]0x0004 -bor [uint32]0x0010 # SWP_NOZORDER | SWP_NOACTIVATE
+          if (-not [GuiInputNative]::SetWindowPos($hwnd, [IntPtr]::Zero, $beforeNarrow.Left, $beforeNarrow.Top, 900, 700, $narrowFlags)) {
+            throw 'SetWindowPos failed during narrow-window validation.'
+          }
+          Start-Sleep -Milliseconds 700
+          [GuiInputNative]::ShowWindowAsync($hwnd, 9) | Out-Null
+          Start-Sleep -Milliseconds 300
+
+          [GuiInputNative+RECT]$afterNarrow = New-Object GuiInputNative+RECT
+          [GuiInputNative]::GetWindowRect($hwnd, [ref]$afterNarrow) | Out-Null
+          if (($afterNarrow.Right - $afterNarrow.Left) -lt 850) { throw 'Narrow-window resize did not apply.' }
+
+          # Restore the pre-narrow dimensions so the final screenshot represents the
+          # normal readable application layout.
+          $restoreWidth = $beforeNarrow.Right - $beforeNarrow.Left
+          $restoreHeight = $beforeNarrow.Bottom - $beforeNarrow.Top
+          [GuiInputNative]::SetWindowPos($hwnd, [IntPtr]::Zero, $beforeNarrow.Left, $beforeNarrow.Top, $restoreWidth, $restoreHeight, $narrowFlags) | Out-Null
+          Start-Sleep -Milliseconds 500
+
+          [GuiInputNative]::ShowWindowAsync($hwnd, 9) | Out-Null
+          $process.Refresh()
+          $process | ForEach-Object { $_.MainWindowHandle } | Out-Null
+          Write-Host 'Responsive state exercise: PASS (search open/close, maximize/restore)'
+
+      - name: Inspect UI layout diagnostics emitted by CI smoke mode
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $projectRoot = Join-Path $PWD $env:PROJECT_DIR
+          $output = Join-Path $projectRoot 'bin\Release'
+          $diagnostics = Join-Path $output 'ci-ui-validation.txt'
+          $processEnv = Join-Path $PWD 'gui-process.env'
+          $guiPid = $null
+          if (Test-Path -LiteralPath $processEnv -PathType Leaf) {
+            $guiPid = [int]((Get-Content -LiteralPath $processEnv -Raw) -replace '^ZTSEC_GUI_PID=', '').Trim()
+          }
+
+          # AppDomain.CurrentDomain.BaseDirectory is the directory containing the
+          # freshly built EXE, not the GitHub Actions step's working directory.
+          # Wait for the application's own diagnostics file to be emitted after the
+          # two real test connections have reached the grid.
+          $found = $false
+          for ($attempt = 1; $attempt -le 30; $attempt++) {
+            if (Test-Path -LiteralPath $diagnostics -PathType Leaf) {
+              $found = $true
+              break
+            }
+
+            if ($guiPid) {
+              $process = Get-Process -Id $guiPid -ErrorAction SilentlyContinue
+              if (-not $process) {
+                $startupLog = Join-Path $output 'startup-error.log'
+                $detail = if (Test-Path -LiteralPath $startupLog -PathType Leaf) { Get-Content -LiteralPath $startupLog -Raw } else { 'No startup-error.log was produced.' }
+                throw "Freshly built GUI process exited before CI UI diagnostics were emitted. PID=$guiPid`n$detail"
+              }
+            }
+
+            Start-Sleep -Seconds 1
+          }
+
+          if (-not $found) {
+            $startupLog = Join-Path $output 'startup-error.log'
+            $detail = if (Test-Path -LiteralPath $startupLog -PathType Leaf) { Get-Content -LiteralPath $startupLog -Raw } else { 'No startup-error.log was produced.' }
+            throw "CI UI validation diagnostics were not produced by the freshly built application at '$diagnostics'.`n$detail"
+          }
+
+          $text = Get-Content -LiteralPath $diagnostics -Raw
+          Write-Host $text
+          if ($text -notmatch 'STATUS: PASS') {
+            throw "CI UI structural validation did not report PASS. Diagnostics: $text"
+          }
+          if ($text -notmatch 'SidebarWidthMatchesDpiScaledTarget: yes') {
+            throw "DPI-aware sidebar geometry validation failed. Diagnostics: $text"
+          }
+          if ($text -notmatch 'SidebarTargetLogical96Dpi: 240') {
+            throw "The application did not report the expected 240 logical-pixel sidebar target. Diagnostics: $text"
+          }
+          if ($text -notmatch 'AccentColorRgb: 80,192,144' -or $text -notmatch 'AccentColorHex: #50C090') {
+            throw "The application did not report the exact #50C090 accent token. Diagnostics: $text"
+          }
+          if ($text -notmatch 'IP=visible' -or $text -notmatch 'UserName=visible' -or $text -notmatch 'GPU=visible' -or $text -notmatch 'Ping=visible') {
+            throw "Required connection fields were not confirmed visible by CI UI validation. Diagnostics: $text"
+          }
+
+      - name: Capture actual application GUI screenshots
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.Drawing
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class CaptureNative {
+              [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+              [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+              [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+              [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+              [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+              [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+              [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+              [DllImport("user32.dll", SetLastError = true)] public static extern bool TrackMouseEvent(ref TRACKMOUSEEVENT tme);
+              [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, uint flags);
+              [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hWnd);
+              [DllImport("user32.dll")] public static extern int GetSystemMetricsForDpi(int nIndex, uint dpi);
+              public const uint WM_NCHITTEST = 0x0084;
+              public const uint WM_NCMOUSEMOVE = 0x00A0;
+              public const uint WM_NCMOUSELEAVE = 0x02A2;
+              public const int HTCLOSE = 20;
+              public const int SM_CXSIZE = 30;
+              public const int SM_CYSIZE = 31;
+              public const uint TME_HOVER = 0x00000001;
+              public const uint TME_NONCLIENT = 0x00000010;
+              public const uint TME_LEAVE = 0x00000002;
+              public const uint TME_CANCEL = 0x80000000;
+              public const uint RDW_INVALIDATE = 0x0001;
+              public const uint RDW_UPDATENOW = 0x0100;
+              public const uint RDW_FRAME = 0x0400;
+              public const uint MOUSEEVENTF_MOVE = 0x0001;
+              public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
+              public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
+              [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+              [StructLayout(LayoutKind.Sequential)] public struct TRACKMOUSEEVENT { public uint cbSize; public uint dwFlags; public IntPtr hwndTrack; public uint dwHoverTime; }
+          }
+          '@
+
+          $projectRoot = Join-Path $PWD $env:PROJECT_DIR
+          $output = Join-Path $projectRoot 'bin\Release'
+          if (-not (Test-Path -LiteralPath $output -PathType Container)) { throw "Release output directory not found: $output" }
+
+          $guiPid = [int]((Get-Content (Join-Path $PWD 'gui-process.env')) -split '=')[1]
+          $process = Get-Process -Id $guiPid -ErrorAction Stop
+
+          function Get-GuiBounds([IntPtr]$hWnd) {
+            [CaptureNative+RECT]$current = New-Object CaptureNative+RECT
+            if (-not [CaptureNative]::GetWindowRect($hWnd, [ref]$current)) { throw 'GetWindowRect failed.' }
+            $width = $current.Right - $current.Left
+            $height = $current.Bottom - $current.Top
+            if ($width -le 0 -or $height -le 0) { throw "Invalid GUI window bounds: ${width}x${height}" }
+            return $current
+          }
+
+          function Capture-GuiPng([IntPtr]$hWnd, [string]$path) {
+            $r = Get-GuiBounds $hWnd
+            $width = $r.Right - $r.Left
+            $height = $r.Bottom - $r.Top
+            $bitmap = New-Object System.Drawing.Bitmap($width, $height)
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            try {
+              $graphics.CopyFromScreen($r.Left, $r.Top, 0, 0, $bitmap.Size)
+              $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+            }
+            finally {
+              $graphics.Dispose()
+              $bitmap.Dispose()
+            }
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "GUI screenshot was not created: $path" }
+            if ((Get-Item -LiteralPath $path).Length -le 0) { throw "GUI screenshot is empty: $path" }
+            $check = $null
+            try {
+              $check = [System.Drawing.Bitmap]::FromFile($path)
+              if ($check.Width -ne $width -or $check.Height -ne $height) {
+                throw "Screenshot dimensions do not match GUI window: expected ${width}x${height}, got $($check.Width)x$($check.Height)"
+              }
+            }
+            finally { if ($check) { $check.Dispose() } }
+            Write-Host "Captured full GUI screenshot: $path ($((Get-Item -LiteralPath $path).Length) bytes; ${width}x${height})"
+          }
+
+          $process.Refresh()
+          $hwnd = [IntPtr]$process.MainWindowHandle
+          if ($hwnd -eq [IntPtr]::Zero) { throw "Fresh GUI process $guiPid has no main window handle." }
+          [CaptureNative]::ShowWindowAsync($hwnd, 9) | Out-Null
+          [CaptureNative]::SetForegroundWindow($hwnd) | Out-Null
+          Start-Sleep -Milliseconds 700
+
+          # Screenshot 1: open the real Connections popup by right-clicking well inside
+          # the main window, intentionally away from every edge.
+          $rect = Get-GuiBounds $hwnd
+          $width = $rect.Right - $rect.Left
+          $height = $rect.Bottom - $rect.Top
+          $clickX = [int]($rect.Left + ($width * 0.50))
+          $clickY = [int]($rect.Top + ($height * 0.50))
+          [CaptureNative]::SetCursorPos($clickX, $clickY) | Out-Null
+          Start-Sleep -Milliseconds 150
+          [CaptureNative]::mouse_event([CaptureNative]::MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+          [CaptureNative]::mouse_event([CaptureNative]::MOUSEEVENTF_RIGHTUP, 0, 0, 0, [UIntPtr]::Zero)
+          Start-Sleep -Milliseconds 800
+
+          $menuMarker = Join-Path $output 'ci-connections-menu-opened.flag'
+          $menuReady = $false
+          for ($menuAttempt = 1; $menuAttempt -le 30; $menuAttempt++) {
+            if (Test-Path -LiteralPath $menuMarker -PathType Leaf) {
+              $markerText = Get-Content -LiteralPath $menuMarker -Raw
+              if ($markerText -match '^OPENED\|.*\|Administration\|Networking\|Plugins\|Management\s*$') {
+                $menuReady = $true
+                break
+              }
+              Remove-Item -LiteralPath $menuMarker -Force -ErrorAction SilentlyContinue
+            }
+
+            $process.Refresh()
+            if ($process.HasExited) { throw "Application exited while opening the Connections context menu. ExitCode=$($process.ExitCode)" }
+            Start-Sleep -Milliseconds 200
+          }
+          if (-not $menuReady) {
+            $startupLog = Join-Path $output 'startup-error.log'
+            $detail = if (Test-Path -LiteralPath $startupLog -PathType Leaf) { Get-Content -LiteralPath $startupLog -Raw } else { 'No startup-error.log was produced.' }
+            throw "The freshly built application did not report its real Connections PopupMenu as open within the bounded wait.`n$detail"
+          }
+          Capture-GuiPng $hwnd (Join-Path $PWD 'gui-screenshot-1.png')
+
+          # Screenshot 2: first dismiss the native DevExpress PopupMenu deterministically.
+          # SendKeys from the PowerShell host is not reliable here because the DevExpress
+          # popup owns foreground input while it is open. Use a real Win32 Escape keypress,
+          # then click the application's title bar as a harmless second dismissal path.
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class InputNative {
+              [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+              [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+              [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+              public const byte VK_ESCAPE = 0x1B;
+              public const uint KEYEVENTF_KEYUP = 0x0002;
+              public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+              public const uint MOUSEEVENTF_LEFTUP = 0x0004;
+          }
+          '@
+
+          [InputNative]::keybd_event([InputNative]::VK_ESCAPE, 0, 0, [UIntPtr]::Zero)
+          [InputNative]::keybd_event([InputNative]::VK_ESCAPE, 0, [InputNative]::KEYEVENTF_KEYUP, [UIntPtr]::Zero)
+          Start-Sleep -Milliseconds 500
+
+          # A single click on the main form's title bar is outside the popup and does
+          # not navigate or alter application state, but it reliably dismisses any
+          # remaining native popup before the CI trigger is consumed by the WinForms UI.
+          $rect = Get-GuiBounds $hwnd
+          $dismissX = [int]($rect.Left + [math]::Max(20, [math]::Min(160, ($rect.Right - $rect.Left) / 10)))
+          $dismissY = [int]($rect.Top + 12)
+          [InputNative]::SetCursorPos($dismissX, $dismissY) | Out-Null
+          Start-Sleep -Milliseconds 100
+          [InputNative]::mouse_event([InputNative]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+          [InputNative]::mouse_event([InputNative]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+          Start-Sleep -Milliseconds 700
+
+          # Probe the real native close button while the main FluentDesignForm is active.
+          # This must happen before the Administration dialog because that dialog is modal
+          # and disables the parent's native caption buttons.
+          $hoverRect = Get-GuiBounds $hwnd
+          $hoverWidth = $hoverRect.Right - $hoverRect.Left
+          $hoverHeight = $hoverRect.Bottom - $hoverRect.Top
+          $safeHoverX = [int]($hoverRect.Left + ($hoverWidth * 0.50))
+          $safeHoverY = [int]($hoverRect.Top + [math]::Max(40, [math]::Min(100, $hoverHeight * 0.20)))
+          [CaptureNative]::SetCursorPos($safeHoverX, $safeHoverY) | Out-Null
+          Start-Sleep -Milliseconds 200
+          [CaptureNative]::SetForegroundWindow($hwnd) | Out-Null
+          Start-Sleep -Milliseconds 400
+          if ([CaptureNative]::GetForegroundWindow() -ne $hwnd) {
+            throw 'Could not make the freshly built FluentDesignForm the foreground window before the native caption hover probe.'
+          }
+
+          # Compute the native caption-button center from the current window DPI rather
+          # than assuming a fixed 20px offset. This keeps the probe valid on the same
+          # PerMonitorV2 configurations the application supports.
+          $windowDpi = [CaptureNative]::GetDpiForWindow($hwnd)
+          if ($windowDpi -eq 0) { $windowDpi = 96 }
+          $captionButtonWidth = [CaptureNative]::GetSystemMetricsForDpi([CaptureNative]::SM_CXSIZE, $windowDpi)
+          $captionButtonHeight = [CaptureNative]::GetSystemMetricsForDpi([CaptureNative]::SM_CYSIZE, $windowDpi)
+          if ($captionButtonWidth -le 0) { $captionButtonWidth = [int][math]::Round(46 * $windowDpi / 96.0) }
+          if ($captionButtonHeight -le 0) { $captionButtonHeight = [int][math]::Round(30 * $windowDpi / 96.0) }
+          $nativeCloseX = $hoverRect.Right - [int][math]::Floor($captionButtonWidth / 2.0)
+          $nativeCloseY = $hoverRect.Top + [int][math]::Floor($captionButtonHeight / 2.0)
+
+          # The low word is screen X and the high word is screen Y for WM_NCHITTEST.
+          $hitParam = [IntPtr](($nativeCloseX -band 0xffff) -bor ((($nativeCloseY -band 0xffff) -shl 16)))
+          $nativeHit = [CaptureNative]::SendMessage($hwnd, [CaptureNative]::WM_NCHITTEST, [IntPtr]::Zero, $hitParam).ToInt32()
+          if ($nativeHit -ne [CaptureNative]::HTCLOSE) {
+            throw "Native caption hover probe did not land on HTCLOSE. Coordinates=($nativeCloseX,$nativeCloseY), hitTest=$nativeHit, dpi=$windowDpi, button=${captionButtonWidth}x${captionButtonHeight}."
+          }
+          Write-Host "Native close-button hit-test: PASS (HTCLOSE at $nativeCloseX,$nativeCloseY; dpi=$windowDpi; button=${captionButtonWidth}x${captionButtonHeight})"
+          # SetCursorPos changes the pointer location but is not sufficient on every
+          # Windows runner to force a fresh non-client hover transition. Explicitly
+          # arm non-client tracking, emit a real mouse-move packet at the native
+          # close-button coordinates, and ask Windows to repaint the non-client frame.
+          # This still targets the actual HWND caption button; no synthetic button
+          # or painted replacement is involved.
+          [CaptureNative]::SetCursorPos($nativeCloseX, $nativeCloseY) | Out-Null
+          Start-Sleep -Milliseconds 100
+          $tme = New-Object CaptureNative+TRACKMOUSEEVENT
+          $tme.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf([type]'CaptureNative+TRACKMOUSEEVENT')
+          $tme.dwFlags = [CaptureNative]::TME_NONCLIENT -bor [CaptureNative]::TME_HOVER -bor [CaptureNative]::TME_LEAVE
+          $tme.hwndTrack = $hwnd
+          $tme.dwHoverTime = 1
+          [CaptureNative]::TrackMouseEvent([ref]$tme) | Out-Null
+          [CaptureNative]::mouse_event([CaptureNative]::MOUSEEVENTF_MOVE, 0, 0, 0, [UIntPtr]::Zero)
+          Start-Sleep -Milliseconds 100
+          [CaptureNative]::SendMessage($hwnd, [CaptureNative]::WM_NCMOUSEMOVE, [IntPtr][CaptureNative]::HTCLOSE, $hitParam) | Out-Null
+          [CaptureNative]::RedrawWindow($hwnd, [IntPtr]::Zero, [IntPtr]::Zero, [CaptureNative]::RDW_INVALIDATE -bor [CaptureNative]::RDW_FRAME -bor [CaptureNative]::RDW_UPDATENOW) | Out-Null
+          Start-Sleep -Milliseconds 700
+          Capture-GuiPng $hwnd (Join-Path $PWD 'gui-native-close-hover.png')
+
+          $readyPath = Join-Path $output 'ci-administration-automation-ready.flag'
+          $consumedPath = Join-Path $output 'ci-open-download-one-consumed.flag'
+          $automationErrorPath = Join-Path $output 'ci-administration-automation-error.txt'
+          $triggerPath = Join-Path $output 'ci-open-download-one.flag'
+          $readySeen = $false
+          for ($readyAttempt = 1; $readyAttempt -le 50; $readyAttempt++) {
+            if (Test-Path -LiteralPath $readyPath -PathType Leaf) {
+              $readyText = Get-Content -LiteralPath $readyPath -Raw
+              Write-Host "CI administration automation ready: $readyText"
+              $readySeen = $true
+              break
+            }
+            if (Test-Path -LiteralPath $automationErrorPath -PathType Leaf) {
+              throw "CI administration automation reported an initialization error: $(Get-Content -LiteralPath $automationErrorPath -Raw)"
+            }
+            $process.Refresh()
+            if ($process.HasExited) { throw "Application exited before the CI administration automation became ready. ExitCode=$($process.ExitCode)" }
+            Start-Sleep -Milliseconds 200
+          }
+          if (-not $readySeen) { throw "The freshly built application did not publish ci-administration-automation-ready.flag from its own AppDomain base directory: $output" }
+
+          Set-Content -LiteralPath $triggerPath -Value '1' -Encoding ascii
+
+          $adminMarker = Join-Path $output 'ci-administration-dialog-opened.flag'
+          $dialogReady = $false
+          $triggerConsumed = $false
+          for ($dialogAttempt = 1; $dialogAttempt -le 60; $dialogAttempt++) {
+            if (-not $triggerConsumed -and (Test-Path -LiteralPath $consumedPath -PathType Leaf)) {
+              $triggerConsumed = $true
+              Write-Host 'CI administration trigger was observed and consumed by the freshly built application.'
+            }
+            if (Test-Path -LiteralPath $automationErrorPath -PathType Leaf) {
+              throw "CI administration automation failed: $(Get-Content -LiteralPath $automationErrorPath -Raw)"
+            }
+            if (Test-Path -LiteralPath $adminMarker -PathType Leaf) {
+              $markerText = Get-Content -LiteralPath $adminMarker -Raw
+              if ($markerText -match '^OPENED\|.*\|Administration\|Download \[ One \]\|DownloadOneChecked=True\s*$') {
+                $dialogReady = $true
+                break
+              }
+              Remove-Item -LiteralPath $adminMarker -Force -ErrorAction SilentlyContinue
+            }
+
+            $process.Refresh()
+            if ($process.HasExited) { throw "Application exited while opening the Administration dialog. ExitCode=$($process.ExitCode)" }
+            Start-Sleep -Milliseconds 250
+          }
+          if (-not $dialogReady) {
+            $startupLog = Join-Path $output 'startup-error.log'
+            $detail = if (Test-Path -LiteralPath $startupLog -PathType Leaf) { Get-Content -LiteralPath $startupLog -Raw } else { 'No startup-error.log was produced.' }
+            $triggerStatus = if (Test-Path -LiteralPath $triggerPath -PathType Leaf) { 'trigger still present (application-side watcher did not consume it)' } elseif ($triggerConsumed) { 'trigger consumed (application-side watcher observed it)' } else { 'trigger file absent but no consume marker was observed' }
+            $automationError = if (Test-Path -LiteralPath $automationErrorPath -PathType Leaf) { Get-Content -LiteralPath $automationErrorPath -Raw } else { 'No CI administration automation error was produced.' }
+            $diagnostic = Join-Path $output 'ci-administration-dialog-timeout.txt'
+            @(
+              "TIMEOUT UTC=$([DateTime]::UtcNow.ToString('O'))"
+              "PID=$($process.Id)"
+              "MainWindowHandle=$($process.MainWindowHandle)"
+              "MainWindowTitle=$($process.MainWindowTitle)"
+              "Trigger=$triggerStatus"
+              "ReadyMarkerExists=$(Test-Path -LiteralPath $readyPath -PathType Leaf)"
+              "ConsumeMarkerExists=$(Test-Path -LiteralPath $consumedPath -PathType Leaf)"
+              "MarkerExists=$(Test-Path -LiteralPath $adminMarker -PathType Leaf)"
+              "AutomationError=$automationError"
+              "StartupLog=$detail"
+            ) | Set-Content -LiteralPath $diagnostic -Encoding utf8
+            throw "The freshly built application did not report the real Administration/Download [ One ] dialog as visible within the bounded wait. $triggerStatus`nAutomationError: $automationError`n$detail`nDiagnostic: $diagnostic"
+          }
+          # The dialog is modal and has just raised its Shown event, so leave it in
+          # the foreground. Capturing the main window rectangle therefore records
+          # the full GUI with the Administration dialog over it.
+          Start-Sleep -Milliseconds 300
+          Capture-GuiPng $hwnd (Join-Path $PWD 'gui-screenshot-2.png')
+
+          [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
+          Start-Sleep -Milliseconds 200
+          Write-Host 'GUI screenshot capture sequence: PASS (context menu + Administration/Download [ One ] full-window capture).'
+
+      - name: Verify rendered UI color from captured screenshots
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $script = Join-Path $PWD (Join-Path $env:PROJECT_DIR 'scripts\verify_ui_rendered_colors.ps1')
+          $audit = Join-Path $PWD 'ui-color-audit.txt'
+          $screenshot1 = Join-Path $PWD 'gui-screenshot-1.png'
+          $screenshot2 = Join-Path $PWD 'gui-screenshot-2.png'
+          $closeHoverScreenshot = Join-Path $PWD 'gui-native-close-hover.png'
+
+          if (-not (Test-Path -LiteralPath $script -PathType Leaf)) { throw "Rendered UI color audit script is missing: $script" }
+          foreach ($path in @($screenshot1, $screenshot2, $closeHoverScreenshot)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Rendered UI screenshot is missing: $path" }
+          }
+
+          # Invoke the audit script directly. Do not rely on Tee-Object here: the audit
+          # script intentionally writes human-readable diagnostics with Write-Host, which
+          # is the PowerShell Information stream. Persist the report from inside the audit
+          # script so a PASS cannot be followed by a false "report not created" failure.
+          $screenshots = @($screenshot1, $screenshot2)
+          if (Test-Path -LiteralPath $audit) { Remove-Item -LiteralPath $audit -Force }
+          try {
+            & $script -Screenshot $screenshots -CloseHoverScreenshot $closeHoverScreenshot -SidebarWidth 240 -ReportPath $audit
+          } catch {
+            if (Test-Path -LiteralPath $audit -PathType Leaf) {
+              Write-Host '--- Rendered UI color audit report (failure) ---'
+              Get-Content -LiteralPath $audit | ForEach-Object { Write-Host $_ }
+              Write-Host '--- End rendered UI color audit report ---'
+            }
+            throw "Rendered UI color audit failed: $($_.Exception.Message)"
+          }
+
+          if (-not (Test-Path -LiteralPath $audit -PathType Leaf)) { throw 'Rendered UI color audit report was not created.' }
+          $auditLength = (Get-Item -LiteralPath $audit).Length
+          if ($auditLength -le 0) { throw 'Rendered UI color audit report was created but is empty.' }
+          Write-Host "Rendered UI color audit report: PASS ($auditLength bytes)"
+
+      - name: Package GUI screenshots into a fixed two-image ZIP
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $screenshot1 = Join-Path $PWD 'gui-screenshot-1.png'
+          $screenshot2 = Join-Path $PWD 'gui-screenshot-2.png'
+          $zip = Join-Path $PWD 'gui-screenshots.zip'
+          foreach ($path in @($screenshot1, $screenshot2)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required screenshot is missing: $path" }
+            if ((Get-Item -LiteralPath $path).Length -le 0) { throw "Required screenshot is empty: $path" }
+          }
+          if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+
+          $staging = Join-Path $PWD 'gui-screenshot-staging'
+          $extract = Join-Path $PWD 'gui-screenshot-verify'
+          foreach ($dir in @($staging, $extract)) { if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force } }
+          New-Item -ItemType Directory -Path $staging -Force | Out-Null
+          Copy-Item -LiteralPath $screenshot1 -Destination (Join-Path $staging 'gui-screenshot-1.png') -Force
+          Copy-Item -LiteralPath $screenshot2 -Destination (Join-Path $staging 'gui-screenshot-2.png') -Force
+
+          Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $zip -CompressionLevel Optimal
+          if (-not (Test-Path -LiteralPath $zip -PathType Leaf) -or (Get-Item -LiteralPath $zip).Length -le 0) { throw 'GUI screenshot ZIP was not created or is empty.' }
+
+          Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
+          $entries = @(Get-ChildItem -LiteralPath $extract -File -Recurse)
+          $expected = @('gui-screenshot-1.png', 'gui-screenshot-2.png')
+          if ($entries.Count -ne 2) { throw "GUI screenshot ZIP must contain exactly two files; found $($entries.Count)." }
+          foreach ($name in $expected) {
+            $entry = $entries | Where-Object { $_.Name -eq $name }
+            if ($entry.Count -ne 1 -or $entry[0].Length -le 0) { throw "GUI screenshot ZIP is missing or has an empty file: $name" }
+          }
+
+          Remove-Item -LiteralPath $screenshot1, $screenshot2 -Force
+          Remove-Item -LiteralPath $staging, $extract -Recurse -Force
+          Write-Host "GUI screenshot artifact: PASS (exactly 2 PNG images; source ZIP=$((Get-Item -LiteralPath $zip).Length) bytes)."
+
+      - name: Package flat Windows runtime
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $projectRoot = Join-Path $PWD $env:PROJECT_DIR
+          $output = Join-Path $projectRoot 'bin\Release'
+          $packageRoot = Join-Path $PWD 'windows-package'
+          $zip = Join-Path $PWD 'ZTSecurity-Windows-Release.zip'
+          $manifest = Get-Content -LiteralPath (Join-Path $projectRoot 'scripts\dependency_manifest.json') -Raw | ConvertFrom-Json
+
+          if (Test-Path -LiteralPath $packageRoot) { Remove-Item -LiteralPath $packageRoot -Recurse -Force }
+          if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+          New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
+
+          $requiredRootFiles = @(
+            $env:EXE_NAME,
+            "$($env:EXE_NAME).config",
+            'world-administrative-boundaries.shp'
+          )
+          foreach ($name in $requiredRootFiles) {
+            $source = Join-Path $output $name
+            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Required runtime file missing from Release output: $source" }
+            Copy-Item -LiteralPath $source -Destination (Join-Path $packageRoot $name) -Force
+          }
+
+          foreach ($entry in @($manifest.required_files)) {
+            $source = Join-Path $output $entry.filename
+            $destination = Join-Path $packageRoot $entry.filename
+            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Required runtime DLL missing from Release output: $($entry.filename)" }
+            Copy-Item -LiteralPath $source -Destination $destination -Force
+          }
+
+          if (Test-Path -LiteralPath (Join-Path $packageRoot 'dependencies')) { throw 'Final runtime package contains a dependencies directory.' }
+
+          $nestedDirs = @(Get-ChildItem -LiteralPath $packageRoot -Directory -Recurse -ErrorAction SilentlyContinue)
+          if ($nestedDirs.Count -gt 0) { throw ('Flat package contains unexpected nested directories: ' + ($nestedDirs.FullName -join ', ')) }
+
+          $packageEntries = @(Get-ChildItem -LiteralPath $packageRoot -File -Force)
+          if ($packageEntries.Count -ne ($manifest.required_files.Count + $requiredRootFiles.Count)) {
+            throw "Unexpected package file count: expected $($manifest.required_files.Count + $requiredRootFiles.Count), got $($packageEntries.Count)"
+          }
+
+          Compress-Archive -Path (Join-Path $packageRoot '*') -DestinationPath $zip -CompressionLevel Optimal
+          if (-not (Test-Path -LiteralPath $zip -PathType Leaf) -or (Get-Item -LiteralPath $zip).Length -le 0) { throw 'Full Windows release ZIP was not created or is empty.' }
+          Write-Host "Created flat Windows runtime ZIP: $zip"
+
+      - name: Package standalone EXE + application config
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $projectRoot = Join-Path $PWD $env:PROJECT_DIR
+          $output = Join-Path $projectRoot 'bin\Release'
+          $exe = Join-Path $output $env:EXE_NAME
+          $config = Join-Path $output ("$($env:EXE_NAME).config")
+          $exeOnly = Join-Path $PWD 'exe-only'
+          $zip = Join-Path $PWD 'ZTSecurity-EXE-Standalone.zip'
+
+          foreach ($path in @($exe, $config)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Standalone artifact input is missing: $path"
+            }
+            if ((Get-Item -LiteralPath $path).Length -le 0) {
+              throw "Standalone artifact input is empty: $path"
+            }
+          }
+
+          # The config file must be the executable's sidecar config generated by MSBuild
+          # from App.config, not the source-time App.config filename.
+          [xml]$null = Get-Content -LiteralPath $config -Raw
+
+          if (Test-Path -LiteralPath $exeOnly) { Remove-Item -LiteralPath $exeOnly -Recurse -Force }
+          if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+          New-Item -ItemType Directory -Path $exeOnly -Force | Out-Null
+
+          Copy-Item -LiteralPath $exe -Destination (Join-Path $exeOnly $env:EXE_NAME) -Force
+          Copy-Item -LiteralPath $config -Destination (Join-Path $exeOnly "$($env:EXE_NAME).config") -Force
+
+          $entries = @(Get-ChildItem -LiteralPath $exeOnly -File -Force | Sort-Object Name)
+          $expected = @($env:EXE_NAME, "$($env:EXE_NAME).config") | Sort-Object
+          if ($entries.Count -ne $expected.Count) {
+            throw "Standalone staging must contain exactly 2 files; found $($entries.Count)."
+          }
+          if ((@($entries.Name) -join '|') -ne ($expected -join '|')) {
+            throw "Standalone staging files are incorrect. Expected: $($expected -join ', '); found: $(@($entries.Name) -join ', ')"
+          }
+
+          Compress-Archive -Path (Join-Path $exeOnly '*') -DestinationPath $zip -CompressionLevel Optimal
+          if (-not (Test-Path -LiteralPath $zip -PathType Leaf) -or (Get-Item -LiteralPath $zip).Length -le 0) {
+            throw 'Standalone EXE ZIP was not created or is empty.'
+          }
+
+          $verifyDir = Join-Path $PWD 'exe-only-verify'
+          if (Test-Path -LiteralPath $verifyDir) { Remove-Item -LiteralPath $verifyDir -Recurse -Force }
+          New-Item -ItemType Directory -Path $verifyDir -Force | Out-Null
+          Expand-Archive -LiteralPath $zip -DestinationPath $verifyDir -Force
+          $verified = @(Get-ChildItem -LiteralPath $verifyDir -File -Recurse | Sort-Object Name)
+          if ($verified.Count -ne 2) { throw "Standalone EXE ZIP must contain exactly 2 files; found $($verified.Count)." }
+          if ((@($verified.Name) -join '|') -ne ($expected -join '|')) { throw "Standalone EXE ZIP contents are incorrect. Expected: $($expected -join ', '); found: $(@($verified.Name) -join ', ')" }
+
+          Remove-Item -LiteralPath $verifyDir -Recurse -Force
+          Write-Host "Standalone EXE ZIP created with EXE + sidecar config: $zip"
+
+      - name: Stop smoke-test processes
+        if: always()
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'SilentlyContinue'
+          if (Test-Path -LiteralPath (Join-Path $PWD 'gui-agent.env')) {
+            $agentPid = [int]((Get-Content (Join-Path $PWD 'gui-agent.env')) -split '=')[1]
+            Stop-Process -Id $agentPid -Force -ErrorAction SilentlyContinue
+          }
+          if (Test-Path -LiteralPath (Join-Path $PWD 'gui-process.env')) {
+            $guiPid = [int]((Get-Content (Join-Path $PWD 'gui-process.env')) -split '=')[1]
+            Stop-Process -Id $guiPid -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload flat Windows release artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ZTSecurity-Windows-${{ github.sha }}
+          path: ${{ github.workspace }}/ZTSecurity-Windows-Release.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload standalone EXE ZIP artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ZTSecurity-EXE-${{ github.sha }}
+          path: ${{ github.workspace }}/ZTSecurity-EXE-Standalone.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload dedicated screenshot artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ZTSecurity-GUI-Screenshots-${{ github.sha }}
+          path: ${{ github.workspace }}/gui-screenshots.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 14

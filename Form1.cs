@@ -70,8 +70,7 @@ namespace ZeroTrace_Security_Official
         private DevExpress.XtraBars.BarSubItem connectionsManagementMenu;
         private DevExpress.XtraBars.BarButtonItem connectionsCloseItem;
         private DevExpress.XtraBars.BarButtonItem connectionsBlockItem;
-        private DevExpress.XtraBars.BarButtonItem connectionsDownloadOneItem;
-        private DevExpress.XtraBars.BarButtonItem connectionsDownloadTwoItem;
+        private DevExpress.XtraBars.BarButtonItem connectionsExecuteItem;
         private DevExpress.XtraBars.BarButtonItem connectionsDownloadUpdateItem;
         private DevExpress.XtraBars.BarButtonItem connectionsExPlugin1Item;
         private DevExpress.XtraBars.BarButtonItem connectionsExPlugin2Item;
@@ -128,6 +127,9 @@ namespace ZeroTrace_Security_Official
         private readonly BlockedConnectionStore blockedConnectionStore = new BlockedConnectionStore();
         private readonly HashSet<string> blockedConnectionRejectionLogged = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, PendingCommand> pendingCommands = new Dictionary<string, PendingCommand>(StringComparer.Ordinal);
+        // Stores the ACK/ERR outcome (true=ACK, false=ERR) for file-delivery commands
+        // so the file-command dialog can poll and display per-connection results.
+        private readonly Dictionary<string, bool> completedCommandResults = new Dictionary<string, bool>(StringComparer.Ordinal);
         private readonly Dictionary<string, long> telemetryRequestTicks = new Dictionary<string, long>();
         private DevExpress.XtraEditors.PanelControl connectionsLayoutHost;
         private DevExpress.XtraEditors.PanelControl connectionsSearchBar;
@@ -1261,7 +1263,7 @@ namespace ZeroTrace_Security_Official
                         {
                             try
                             {
-                                ShowAdministrationDialog("Download [ One ]");
+                                ShowRemoteExecutionDialog();
                             }
                             catch (Exception ex)
                             {
@@ -5025,11 +5027,9 @@ namespace ZeroTrace_Security_Official
             DisposeConnectionMenuIcons();
 
             connectionsAdministrationMenu = CreateConnectionMenuGroup("Administration", "menu_administration.svg");
-            connectionsDownloadOneItem = CreateConnectionMenuItem("Download [ One ]", delegate { ShowAdministrationDialog("Download [ One ]"); });
-            connectionsDownloadTwoItem = CreateConnectionMenuItem("Download [ Two ]", delegate { ShowAdministrationDialog("Download [ Two ]"); });
-            connectionsDownloadUpdateItem = CreateConnectionMenuItem("Download and Update", delegate { ShowAdministrationDialog("Download and Update"); });
-            connectionsAdministrationMenu.AddItem(connectionsDownloadOneItem);
-            connectionsAdministrationMenu.AddItem(connectionsDownloadTwoItem);
+            connectionsExecuteItem = CreateConnectionMenuItem("Download [ One ]", delegate { ShowRemoteExecutionDialog(); });
+            connectionsDownloadUpdateItem = CreateConnectionMenuItem("Download and Update", delegate { ShowRemoteUpdateDialog(); });
+            connectionsAdministrationMenu.AddItem(connectionsExecuteItem);
             connectionsAdministrationMenu.AddItem(connectionsDownloadUpdateItem);
 
             connectionsNetworkingMenu = CreateConnectionMenuGroup("Networking", "menu_networking.svg");
@@ -5204,6 +5204,11 @@ namespace ZeroTrace_Security_Official
             lock (connectionStateLock)
             {
                 wasPending = pendingCommands.Remove(key);
+                if (wasPending)
+                {
+                    // Record result so file-command dialogs can poll the outcome.
+                    completedCommandResults[key] = acknowledged;
+                }
             }
 
             // A timeout or disconnect may already have produced the final result.
@@ -5234,241 +5239,580 @@ namespace ZeroTrace_Security_Official
                 LogFinalCommandResult(command.Command, "ACK not received", LogType.Warning);
         }
 
-        private void ShowAdministrationDialog(string selectedAction)
+        // ── Remote Execution Dialog ──────────────────────────────────────────────
+        // Sends CMD:EXECUTE:<ext>:<base64> to every selected connection.
+        // Supported extensions (as the agent enforces): exe | bat | ps1
+        private void ShowRemoteExecutionDialog()
         {
-            const int DialogWidth = 620;
-            const int DialogHeight = 344;
-            Color window = Color.FromArgb(35, 37, 38);
-            Color titleBar = Color.FromArgb(29, 31, 32);
-            Color surface = Color.FromArgb(43, 45, 46);
-            Color field = Color.FromArgb(31, 33, 34);
-            Color border = Color.FromArgb(70, 74, 74);
-            Color text = Color.FromArgb(239, 242, 241);
-            Color muted = Color.FromArgb(164, 171, 168);
-            Color accent = SidebarAccentColor;
-
-            using (Form dialog = new Form())
+            List<string> targetIds = GetSelectedConnectionIdsList();
+            if (targetIds.Count == 0)
             {
-                dialog.Name = "AdministrationDialog";
-                dialog.Text = "Administration";
-                dialog.StartPosition = FormStartPosition.Manual;
-                dialog.FormBorderStyle = FormBorderStyle.None;
-                dialog.MinimizeBox = false;
-                dialog.MaximizeBox = false;
-                dialog.ShowInTaskbar = false;
-                dialog.ClientSize = new Size(DialogWidth, DialogHeight);
-                dialog.BackColor = window;
-                dialog.ForeColor = text;
-                dialog.Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
-                dialog.KeyPreview = true;
+                MessageBox.Show("No connections selected.", "Execute Remotely",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
 
-                using (System.Drawing.Drawing2D.GraphicsPath path = CreateRoundedRectanglePath(new Rectangle(0, 0, DialogWidth, DialogHeight), 12))
-                    dialog.Region = new Region(path);
+            ShowFileCommandDialog(
+                title:       "Remote Execution",
+                subtitle:    "Drop and execute a file on " + (targetIds.Count == 1 ? "1 connection" : targetIds.Count + " connections"),
+                hint:        "Select a local file to push and execute on the target(s).",
+                fileFilter:  "Executable files (*.exe;*.bat;*.ps1)|*.exe;*.bat;*.ps1|EXE files (*.exe)|*.exe|BAT scripts (*.bat)|*.bat|PowerShell scripts (*.ps1)|*.ps1",
+                actionLabel: "Execute Remotely",
+                targetIds:   targetIds,
+                buildCommand: (filePath) =>
+                {
+                    string ext = Path.GetExtension(filePath).TrimStart('.').ToLowerInvariant();
+                    if (ext != "exe" && ext != "bat" && ext != "ps1")
+                        throw new InvalidOperationException("Unsupported file type: " + ext + ". Agent accepts exe, bat, ps1 only.");
+                    byte[] bytes = File.ReadAllBytes(filePath);
+                    if (bytes.Length == 0)
+                        throw new InvalidOperationException("File is empty.");
+                    string b64 = Convert.ToBase64String(bytes);
+                    return ("CMD:EXECUTE:" + ext + ":" + b64, "EXECUTE:");
+                });
+        }
 
-                Panel titlePanel = new Panel
-                {
-                    Dock = DockStyle.Top,
-                    Height = 58,
-                    BackColor = titleBar
-                };
-                titlePanel.Paint += delegate(object sender, PaintEventArgs args)
-                {
-                    using (Pen accentPen = new Pen(accent, 1.5f))
-                        args.Graphics.DrawLine(accentPen, new Point(0, 0), new Point(0, titlePanel.Height));
-                };
-                Label title = new Label
-                {
-                    Text = "Administration",
-                    AutoSize = true,
-                    Font = new Font("Segoe UI Semibold", 12.5F, FontStyle.Bold, GraphicsUnit.Point),
-                    ForeColor = text,
-                    Location = new Point(22, 15)
-                };
-                Label close = new Label
-                {
-                    AutoSize = false,
-                    Size = new Size(46, 46),
-                    Text = "×",
-                    TextAlign = ContentAlignment.MiddleCenter,
-                    Font = new Font("Segoe UI Light", 19F, FontStyle.Regular, GraphicsUnit.Point),
-                    ForeColor = muted,
-                    Cursor = Cursors.Hand,
-                    Anchor = AnchorStyles.Top | AnchorStyles.Right,
-                    Location = new Point(DialogWidth - 55, 8)
-                };
-                close.MouseEnter += delegate { close.ForeColor = text; close.BackColor = Color.FromArgb(55, 58, 58); };
-                close.MouseLeave += delegate { close.ForeColor = muted; close.BackColor = Color.Transparent; };
-                close.Click += delegate { dialog.DialogResult = DialogResult.Cancel; dialog.Close(); };
+        // ── Remote Update Dialog ─────────────────────────────────────────────────
+        // Sends CMD:UPDATE:<sha256hex>:<base64> to every selected connection.
+        // The agent validates the MZ header and SHA-256 hash before staging.
+        private void ShowRemoteUpdateDialog()
+        {
+            List<string> targetIds = GetSelectedConnectionIdsList();
+            if (targetIds.Count == 0)
+            {
+                MessageBox.Show("No connections selected.", "Download and Update",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
 
-                titlePanel.Controls.Add(title);
-                titlePanel.Controls.Add(close);
-
-                // The custom title bar also provides natural mouse dragging.
-                Point dragOffset = Point.Empty;
-                titlePanel.MouseDown += delegate(object sender, MouseEventArgs args)
+            ShowFileCommandDialog(
+                title:       "Download and Update",
+                subtitle:    "Replace agent binary on " + (targetIds.Count == 1 ? "1 connection" : targetIds.Count + " connections"),
+                hint:        "Select the new agent executable (.exe) to push. The agent validates the SHA-256 before replacing itself.",
+                fileFilter:  "Agent executable (*.exe)|*.exe",
+                actionLabel: "Send Update",
+                targetIds:   targetIds,
+                buildCommand: (filePath) =>
                 {
-                    if (args.Button == MouseButtons.Left) dragOffset = args.Location;
-                };
-                titlePanel.MouseMove += delegate(object sender, MouseEventArgs args)
-                {
-                    if (args.Button == MouseButtons.Left)
+                    byte[] bytes = File.ReadAllBytes(filePath);
+                    if (bytes.Length == 0)
+                        throw new InvalidOperationException("File is empty.");
+                    if (bytes.Length > 64 * 1024 * 1024)
+                        throw new InvalidOperationException("File exceeds 64 MB agent limit.");
+                    if (bytes.Length < 2 || bytes[0] != 0x4D || bytes[1] != 0x5A)
+                        throw new InvalidOperationException("File does not have an MZ (PE) header. The agent only accepts valid Windows executables.");
+                    using (SHA256 sha = SHA256.Create())
                     {
-                        Point cursor = Cursor.Position;
-                        dialog.Location = new Point(cursor.X - dragOffset.X - titlePanel.Left, cursor.Y - dragOffset.Y - titlePanel.Top);
+                        string hash = BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant();
+                        string b64  = Convert.ToBase64String(bytes);
+                        return ("CMD:UPDATE:" + hash + ":" + b64, "UPDATE:");
+                    }
+                });
+        }
+
+        // ── Shared File-Command Dialog ───────────────────────────────────────────
+        // Presents the styled popup (matching the reference screenshot), builds the
+        // command via buildCommand(), then sends it to every targetId showing a live
+        // per-connection progress table and response status.
+        private void ShowFileCommandDialog(
+            string title,
+            string subtitle,
+            string hint,
+            string fileFilter,
+            string actionLabel,
+            List<string> targetIds,
+            Func<string, (string command, string commandKey)> buildCommand)
+        {
+            const int W = 660;
+            Color window   = Color.FromArgb(28, 30, 31);
+            Color titleBar = Color.FromArgb(22, 24, 25);
+            Color surface  = Color.FromArgb(38, 40, 41);
+            Color field    = Color.FromArgb(24, 26, 27);
+            Color border   = Color.FromArgb(58, 62, 63);
+            Color textCol  = Color.FromArgb(235, 238, 237);
+            Color muted    = Color.FromArgb(140, 148, 146);
+            Color accent   = SidebarAccentColor;
+            Color success  = Color.FromArgb(72, 199, 116);
+            Color errCol   = Color.FromArgb(235, 78, 78);
+            Color rowOdd   = Color.FromArgb(33, 35, 36);
+            Color rowEven  = Color.FromArgb(38, 40, 41);
+
+            // Per-connection result state
+            int connCount = targetIds.Count;
+            int tableRowH = 28;
+            int tableH    = Math.Min(connCount, 6) * tableRowH + 2; // cap visible rows
+            int H         = 72 + 42 + 70 + 24 + 12 + tableH + 16 + 48 + 14; // title+file+table+btn
+
+            using (Form dlg = new Form())
+            {
+                dlg.Text            = title;
+                dlg.Name            = "RemoteCommandDialog";
+                dlg.StartPosition   = FormStartPosition.Manual;
+                dlg.FormBorderStyle = FormBorderStyle.None;
+                dlg.MinimizeBox     = false;
+                dlg.MaximizeBox     = false;
+                dlg.ShowInTaskbar   = false;
+                dlg.ClientSize      = new Size(W, H);
+                dlg.BackColor       = window;
+                dlg.ForeColor       = textCol;
+                dlg.Font            = new Font("Segoe UI", 9F);
+                dlg.KeyPreview      = true;
+                dlg.KeyDown        += (s, e) => { if (e.KeyCode == Keys.Escape) dlg.Close(); };
+
+                using (var rp = CreateRoundedRectanglePath(new Rectangle(0, 0, W, H), 10))
+                    dlg.Region = new Region(rp);
+
+                // ── Title bar ────────────────────────────────────────────────────
+                Panel titlePanel = new Panel { Dock = DockStyle.Top, Height = 58, BackColor = titleBar };
+                titlePanel.Paint += (s, e) =>
+                {
+                    using (Pen p = new Pen(accent, 2f))
+                        e.Graphics.DrawLine(p, 0, 0, 0, titlePanel.Height);
+                };
+                Label lblTitle = new Label
+                {
+                    Text      = title,
+                    AutoSize  = true,
+                    Font      = new Font("Segoe UI Semibold", 12F, FontStyle.Bold),
+                    ForeColor = textCol,
+                    Location  = new Point(18, 10)
+                };
+                Label lblSub = new Label
+                {
+                    Text      = subtitle,
+                    AutoSize  = true,
+                    Font      = new Font("Segoe UI", 8.25F),
+                    ForeColor = muted,
+                    Location  = new Point(19, 34)
+                };
+                Label btnClose = new Label
+                {
+                    AutoSize      = false,
+                    Size          = new Size(44, 44),
+                    Text          = "×",
+                    TextAlign     = ContentAlignment.MiddleCenter,
+                    Font          = new Font("Segoe UI Light", 18F),
+                    ForeColor     = muted,
+                    Cursor        = Cursors.Hand,
+                    Anchor        = AnchorStyles.Top | AnchorStyles.Right,
+                    Location      = new Point(W - 50, 7)
+                };
+                btnClose.MouseEnter += (s, e) => { btnClose.ForeColor = textCol; btnClose.BackColor = Color.FromArgb(50, 53, 54); };
+                btnClose.MouseLeave += (s, e) => { btnClose.ForeColor = muted;    btnClose.BackColor = Color.Transparent; };
+                btnClose.Click      += (s, e) => dlg.Close();
+
+                Point dragOff = Point.Empty;
+                titlePanel.MouseDown += (s, e) => { if (e.Button == MouseButtons.Left) dragOff = e.Location; };
+                titlePanel.MouseMove += (s, e) =>
+                {
+                    if (e.Button == MouseButtons.Left)
+                    {
+                        Point cur = Cursor.Position;
+                        dlg.Location = new Point(cur.X - dragOff.X - titlePanel.Left, cur.Y - dragOff.Y - titlePanel.Top);
                     }
                 };
 
-                Label fileLabel = new Label
-                {
-                    Text = "File",
-                    AutoSize = true,
-                    Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold, GraphicsUnit.Point),
-                    ForeColor = text,
-                    Location = new Point(28, 78)
-                };
-                Label fileHint = new Label
-                {
-                    Text = "Select the local file to use for this administration action.",
-                    AutoSize = true,
-                    Font = new Font("Segoe UI", 8.25F, FontStyle.Regular, GraphicsUnit.Point),
-                    ForeColor = muted,
-                    Location = new Point(28, 97)
-                };
+                titlePanel.Controls.Add(lblTitle);
+                titlePanel.Controls.Add(lblSub);
+                titlePanel.Controls.Add(btnClose);
 
-                Panel filePanel = new Panel
+                // ── File row ─────────────────────────────────────────────────────
+                int y = 68;
+                Label lblFileHint = new Label
                 {
-                    Location = new Point(28, 124),
-                    Size = new Size(564, 44),
+                    Text      = hint,
+                    AutoSize  = false,
+                    Width     = W - 36,
+                    Height    = 18,
+                    ForeColor = muted,
+                    Font      = new Font("Segoe UI", 8.25F),
+                    Location  = new Point(18, y)
+                };
+                y += 22;
+
+                Panel fileRow = new Panel
+                {
+                    Location  = new Point(18, y),
+                    Size      = new Size(W - 36, 40),
                     BackColor = field
                 };
-                filePanel.Paint += delegate(object sender, PaintEventArgs args)
+                fileRow.Paint += (s, e) =>
                 {
-                    using (Pen pen = new Pen(border, 1))
-                        args.Graphics.DrawRectangle(pen, 0, 0, filePanel.Width - 1, filePanel.Height - 1);
+                    using (Pen p = new Pen(border))
+                        e.Graphics.DrawRectangle(p, 0, 0, fileRow.Width - 1, fileRow.Height - 1);
                 };
-                TextBox filePath = new TextBox
+                TextBox tbPath = new TextBox
                 {
                     BorderStyle = BorderStyle.None,
-                    Location = new Point(13, 12),
-                    Width = 400,
-                    Height = 20,
-                    ReadOnly = true,
-                    BackColor = field,
-                    ForeColor = text,
-                    Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point),
-                    TabStop = false
+                    Location    = new Point(10, 10),
+                    Width       = fileRow.Width - 110,
+                    Height      = 20,
+                    ReadOnly    = true,
+                    BackColor   = field,
+                    ForeColor   = textCol,
+                    Font        = new Font("Segoe UI", 9F),
+                    TabStop     = false
                 };
-                Button browse = new Button
+                Button btnBrowse = new Button
                 {
-                    Text = "Browse",
+                    Text      = "Browse…",
                     FlatStyle = FlatStyle.Flat,
-                    Location = new Point(457, 6),
-                    Size = new Size(98, 32),
-                    BackColor = Color.FromArgb(49, 50, 51),
+                    Location  = new Point(fileRow.Width - 98, 4),
+                    Size      = new Size(90, 32),
+                    BackColor = surface,
                     ForeColor = Color.White,
-                    Font = new Font("Segoe UI Semibold", 8.75F, FontStyle.Bold, GraphicsUnit.Point),
-                    Cursor = Cursors.Hand
+                    Font      = new Font("Segoe UI Semibold", 8.75F, FontStyle.Bold),
+                    Cursor    = Cursors.Hand
                 };
-                browse.FlatAppearance.BorderColor = Color.FromArgb(93, 99, 99);
-                browse.FlatAppearance.MouseOverBackColor = Color.FromArgb(58, 61, 62);
-                browse.FlatAppearance.MouseDownBackColor = Color.FromArgb(64, 67, 68);
-                browse.Click += delegate
+                btnBrowse.FlatAppearance.BorderColor        = border;
+                btnBrowse.FlatAppearance.MouseOverBackColor = Color.FromArgb(52, 55, 56);
+                btnBrowse.FlatAppearance.MouseDownBackColor = Color.FromArgb(60, 63, 64);
+                btnBrowse.Click += (s, e) =>
                 {
-                    using (OpenFileDialog chooser = new OpenFileDialog { Title = "Select a file", CheckFileExists = true, Multiselect = false })
+                    using (OpenFileDialog ofd = new OpenFileDialog
+                           { Title = "Select file", Filter = fileFilter, CheckFileExists = true, Multiselect = false })
                     {
-                        if (chooser.ShowDialog(dialog) == DialogResult.OK) filePath.Text = chooser.FileName;
+                        if (ofd.ShowDialog(dlg) == DialogResult.OK)
+                            tbPath.Text = ofd.FileName;
                     }
                 };
-                filePanel.Controls.Add(filePath);
-                filePanel.Controls.Add(browse);
+                fileRow.Controls.Add(tbPath);
+                fileRow.Controls.Add(btnBrowse);
+                y += 46;
 
-                Label actionLabel = new Label
+                // ── Connection table header ──────────────────────────────────────
+                Label lblConns = new Label
                 {
-                    Text = "Administration action",
-                    AutoSize = true,
-                    Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold, GraphicsUnit.Point),
-                    ForeColor = text,
-                    Location = new Point(28, 186)
+                    Text      = "Selected connections  (" + connCount + ")",
+                    AutoSize  = true,
+                    Font      = new Font("Segoe UI Semibold", 8.5F, FontStyle.Bold),
+                    ForeColor = textCol,
+                    Location  = new Point(18, y)
                 };
-                Label actionHint = new Label
+                y += 20;
+
+                // Table is a Panel with per-row sub-panels we update later
+                Panel tableOuter = new Panel
                 {
-                    Text = "Select one option. The highlighted choice is the one submitted by OK.",
-                    AutoSize = true,
-                    Font = new Font("Segoe UI", 8.25F, FontStyle.Regular, GraphicsUnit.Point),
-                    ForeColor = muted,
-                    Location = new Point(28, 205)
+                    Location    = new Point(18, y),
+                    Size        = new Size(W - 36, tableH + 2),
+                    BackColor   = window,
+                    AutoScroll  = tableH < connCount * tableRowH  // scroll if capped
                 };
 
-                RadioButton one = CreateAdministrationRadio("Download [ One ]", new Point(28, 235), surface, border, accent, text);
-                RadioButton two = CreateAdministrationRadio("Download [ Two ]", new Point(218, 235), surface, border, accent, text);
-                RadioButton update = CreateAdministrationRadio("Download and Update", new Point(408, 235), surface, border, accent, text);
-                one.Checked = selectedAction == "Download [ One ]";
-                two.Checked = selectedAction == "Download [ Two ]";
-                update.Checked = selectedAction == "Download and Update";
+                // Column widths
+                int cConn = 220, cStatus = 140, cProgress = tableOuter.Width - 220 - 140 - 2;
 
-                Button cancel = new Button
+                // Header row
+                Panel hdrRow = new Panel
                 {
-                    Text = "Cancel",
-                    DialogResult = DialogResult.Cancel,
+                    Location  = new Point(0, 0),
+                    Size      = new Size(tableOuter.Width, tableRowH - 2),
+                    BackColor = Color.FromArgb(26, 28, 29)
+                };
+                void AddHdrLabel(string t, int x, int w)
+                {
+                    hdrRow.Controls.Add(new Label
+                    {
+                        Text      = t,
+                        Location  = new Point(x + 6, 6),
+                        Size      = new Size(w - 8, 18),
+                        Font      = new Font("Segoe UI Semibold", 8F, FontStyle.Bold),
+                        ForeColor = muted
+                    });
+                }
+                AddHdrLabel("Client", 0, cConn);
+                AddHdrLabel("Status", cConn, cStatus);
+                AddHdrLabel("Progress", cConn + cStatus, cProgress);
+                tableOuter.Controls.Add(hdrRow);
+
+                // Data rows – one per target connection
+                var rowPanels   = new Panel[connCount];
+                var lblStatuses = new Label[connCount];
+                var progressBars= new Panel[connCount];
+                var progressInner=new Panel[connCount];
+
+                for (int i = 0; i < connCount; i++)
+                {
+                    string cid = targetIds[i];
+                    string displayName = GetConnectionDisplayName(cid);
+
+                    Color bg = (i % 2 == 0) ? rowOdd : rowEven;
+                    Panel row = new Panel
+                    {
+                        Location  = new Point(0, (i + 1) * (tableRowH - 2) + 2),
+                        Size      = new Size(tableOuter.Width, tableRowH - 2),
+                        BackColor = bg
+                    };
+
+                    Label lblConn = new Label
+                    {
+                        Text      = displayName,
+                        Location  = new Point(6, 5),
+                        Size      = new Size(cConn - 10, 18),
+                        Font      = new Font("Segoe UI", 8.5F),
+                        ForeColor = textCol
+                    };
+
+                    Label lblStat = new Label
+                    {
+                        Text      = "Waiting…",
+                        Location  = new Point(cConn + 6, 5),
+                        Size      = new Size(cStatus - 10, 18),
+                        Font      = new Font("Segoe UI", 8.5F),
+                        ForeColor = muted
+                    };
+
+                    // Progress bar container
+                    Panel pbOuter = new Panel
+                    {
+                        Location  = new Point(cConn + cStatus + 6, 8),
+                        Size      = new Size(cProgress - 18, 12),
+                        BackColor = Color.FromArgb(20, 22, 23)
+                    };
+                    pbOuter.Paint += (s, e) =>
+                    {
+                        using (Pen p = new Pen(border))
+                            e.Graphics.DrawRectangle(p, 0, 0, pbOuter.Width - 1, pbOuter.Height - 1);
+                    };
+                    Panel pbInner = new Panel
+                    {
+                        Location  = new Point(1, 1),
+                        Size      = new Size(0, pbOuter.Height - 2),
+                        BackColor = accent
+                    };
+                    pbOuter.Controls.Add(pbInner);
+
+                    row.Controls.Add(lblConn);
+                    row.Controls.Add(lblStat);
+                    row.Controls.Add(pbOuter);
+                    tableOuter.Controls.Add(row);
+
+                    rowPanels[i]    = row;
+                    lblStatuses[i]  = lblStat;
+                    progressBars[i] = pbOuter;
+                    progressInner[i]= pbInner;
+                }
+
+                y += tableH + 8;
+
+                // ── Action buttons ────────────────────────────────────────────────
+                Button btnCancel = new Button
+                {
+                    Text      = "Cancel",
                     FlatStyle = FlatStyle.Flat,
-                    Location = new Point(404, 294),
-                    Size = new Size(88, 34),
-                    BackColor = Color.FromArgb(48, 50, 51),
-                    ForeColor = text,
-                    Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold, GraphicsUnit.Point),
-                    Cursor = Cursors.Hand
+                    Location  = new Point(W - 214, y),
+                    Size      = new Size(88, 34),
+                    BackColor = surface,
+                    ForeColor = textCol,
+                    Font      = new Font("Segoe UI Semibold", 9F, FontStyle.Bold),
+                    Cursor    = Cursors.Hand
                 };
-                cancel.FlatAppearance.BorderColor = border;
-                cancel.FlatAppearance.MouseOverBackColor = Color.FromArgb(57, 60, 60);
-                cancel.FlatAppearance.MouseDownBackColor = Color.FromArgb(64, 67, 67);
+                btnCancel.FlatAppearance.BorderColor        = border;
+                btnCancel.FlatAppearance.MouseOverBackColor = Color.FromArgb(52, 55, 56);
+                btnCancel.FlatAppearance.MouseDownBackColor = Color.FromArgb(60, 63, 64);
+                btnCancel.Click += (s, e) => dlg.Close();
 
-                Button ok = new Button
+                Button btnSend = new Button
                 {
-                    Text = "OK",
+                    Text      = actionLabel,
                     FlatStyle = FlatStyle.Flat,
-                    Location = new Point(502, 294),
-                    Size = new Size(90, 34),
+                    Location  = new Point(W - 118, y),
+                    Size      = new Size(100, 34),
                     BackColor = accent,
                     ForeColor = Color.White,
-                    Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold, GraphicsUnit.Point),
-                    Cursor = Cursors.Hand
+                    Font      = new Font("Segoe UI Semibold", 9F, FontStyle.Bold),
+                    Cursor    = Cursors.Hand
                 };
-                ok.FlatAppearance.BorderSize = 0;
-                ok.FlatAppearance.MouseOverBackColor = accent;
-                ok.FlatAppearance.MouseDownBackColor = accent;
-                ok.Click += delegate { /* Intentionally a no-op for now. */ };
+                btnSend.FlatAppearance.BorderSize = 0;
+                btnSend.FlatAppearance.MouseOverBackColor = accent;
+                btnSend.FlatAppearance.MouseDownBackColor = accent;
 
-                dialog.AcceptButton = ok;
-                dialog.CancelButton = cancel;
-                dialog.Controls.Add(titlePanel);
-                dialog.Controls.Add(fileLabel);
-                dialog.Controls.Add(fileHint);
-                dialog.Controls.Add(filePanel);
-                dialog.Controls.Add(actionLabel);
-                dialog.Controls.Add(actionHint);
-                dialog.Controls.Add(one);
-                dialog.Controls.Add(two);
-                dialog.Controls.Add(update);
-                dialog.Controls.Add(cancel);
-                dialog.Controls.Add(ok);
+                // ── Execute click handler ─────────────────────────────────────────
+                btnSend.Click += (s, e) =>
+                {
+                    string fp = tbPath.Text.Trim();
+                    if (string.IsNullOrWhiteSpace(fp) || !File.Exists(fp))
+                    {
+                        MessageBox.Show("Please select a valid file before proceeding.", title,
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
 
-                // Center the modal over the complete main GUI client area (including
-                // the sidebar). This keeps the dialog visually attached to its owner
-                // while remaining correct when the owner sits on any monitor.
+                    btnSend.Enabled   = false;
+                    btnBrowse.Enabled = false;
+                    btnCancel.Text    = "Close";
+
+                    string rawCommand;
+                    string cmdKey;
+                    try
+                    {
+                        (rawCommand, cmdKey) = buildCommand(fp);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show("Cannot build command: " + ex.Message, title,
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        btnSend.Enabled   = true;
+                        btnBrowse.Enabled = true;
+                        btnCancel.Text    = "Cancel";
+                        return;
+                    }
+
+                    byte[] rawBytes = Encoding.UTF8.GetBytes(rawCommand + "\n");
+
+                    // Send to every target on background threads
+                    for (int i = 0; i < connCount; i++)
+                    {
+                        int idx = i;
+                        string cid = targetIds[idx];
+
+                        // Mark as sending
+                        Action<string, Color, int> updateRow = (statusText, statusColor, pct) =>
+                        {
+                            if (dlg.IsDisposed) return;
+                            if (dlg.InvokeRequired)
+                            {
+                                dlg.Invoke(new Action(() => updateRow(statusText, statusColor, pct)));
+                                return;
+                            }
+                            if (lblStatuses[idx] == null || lblStatuses[idx].IsDisposed) return;
+                            lblStatuses[idx].Text      = statusText;
+                            lblStatuses[idx].ForeColor = statusColor;
+                            if (progressInner[idx] != null && !progressInner[idx].IsDisposed && progressBars[idx] != null && !progressBars[idx].IsDisposed)
+                            {
+                                int w = Math.Max(0, (progressBars[idx].Width - 2) * pct / 100);
+                                progressInner[idx].Width    = w;
+                                progressInner[idx].BackColor = pct < 100
+                                    ? (pct == 0 ? surface : accent)
+                                    : (statusColor == success ? success : errCol);
+                            }
+                        };
+
+                        updateRow("Sending…", muted, 0);
+
+                        Task.Run(() =>
+                        {
+                            TcpClient tcpClient = null;
+                            lock (connectionStateLock)
+                                connectedClients.TryGetValue(cid, out tcpClient);
+
+                            if (tcpClient == null)
+                            {
+                                updateRow("Unavailable", errCol, 0);
+                                return;
+                            }
+
+                            try
+                            {
+                                NetworkStream ns = tcpClient.GetStream();
+
+                                // Stream the raw bytes with fake progress ticks
+                                int total   = rawBytes.Length;
+                                int chunk   = Math.Max(4096, total / 20);
+                                int sent    = 0;
+                                while (sent < total)
+                                {
+                                    int toSend = Math.Min(chunk, total - sent);
+                                    ns.Write(rawBytes, sent, toSend);
+                                    sent += toSend;
+                                    int pct = sent * 100 / total;
+                                    updateRow("Uploading…", accent, Math.Min(pct, 95));
+                                }
+                                ns.Flush();
+
+                                updateRow("Awaiting response…", muted, 96);
+
+                                // Register in pendingCommands so HandleClient's ACK/ERR
+                                // path reaches CompletePendingCommand and stores the result.
+                                // We do NOT call TrackPendingCommand() because its 4-second
+                                // internal watchdog would fire before the update finishes.
+                                string resultKey = cid + "|" + cmdKey.ToUpperInvariant();
+                                lock (connectionStateLock)
+                                {
+                                    pendingCommands[resultKey] = new PendingCommand
+                                    {
+                                        ConnectionId = cid,
+                                        Command      = cmdKey.ToUpperInvariant(),
+                                        SentAtUtc    = DateTime.UtcNow
+                                    };
+                                }
+
+                                // Wait up to 30 s for ACK or ERR
+                                DateTime deadline = DateTime.UtcNow.AddSeconds(30);
+                                bool? ackResult = null;
+                                while (DateTime.UtcNow < deadline)
+                                {
+                                    lock (connectionStateLock)
+                                    {
+                                        if (!pendingCommands.ContainsKey(resultKey))
+                                        {
+                                            // CompletePendingCommand removed it → outcome is stored
+                                            if (completedCommandResults.TryGetValue(resultKey, out bool ack))
+                                            {
+                                                completedCommandResults.Remove(resultKey);
+                                                ackResult = ack;
+                                            }
+                                            else
+                                            {
+                                                ackResult = false; // key gone without a result → error
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    Thread.Sleep(100);
+                                }
+
+                                if (ackResult == null)
+                                {
+                                    // Timed out – remove stale tracking
+                                    lock (connectionStateLock)
+                                    {
+                                        pendingCommands.Remove(resultKey);
+                                        completedCommandResults.Remove(resultKey);
+                                    }
+                                    updateRow("Timed out", errCol, 100);
+                                }
+                                else if (ackResult == true)
+                                {
+                                    updateRow("Process started successfully", success, 100);
+                                }
+                                else
+                                {
+                                    updateRow("Failed – agent returned error", errCol, 100);
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                updateRow("Error: " + ex.Message, errCol, 0);
+                            }
+                        });
+                    }
+                };
+
+                // ── Assemble dialog ───────────────────────────────────────────────
+                dlg.Controls.Add(titlePanel);
+                dlg.Controls.Add(lblFileHint);
+                dlg.Controls.Add(fileRow);
+                dlg.Controls.Add(lblConns);
+                dlg.Controls.Add(tableOuter);
+                dlg.Controls.Add(btnCancel);
+                dlg.Controls.Add(btnSend);
+
                 Rectangle ownerClient = RectangleToScreen(ClientRectangle);
-                int dialogX = ownerClient.Left + Math.Max(0, (ownerClient.Width - DialogWidth) / 2);
-                int dialogY = ownerClient.Top + Math.Max(0, (ownerClient.Height - DialogHeight) / 2);
-                dialog.Location = new Point(dialogX, dialogY);
+                dlg.Location = new Point(
+                    ownerClient.Left + Math.Max(0, (ownerClient.Width  - W) / 2),
+                    ownerClient.Top  + Math.Max(0, (ownerClient.Height - H) / 2));
 
                 if (string.Equals(Environment.GetEnvironmentVariable("ZTSEC_CI_SMOKE"), "1", StringComparison.Ordinal))
                 {
-                    dialog.Shown += delegate
+                    dlg.Shown += (s, e) =>
                     {
                         try
                         {
                             string markerPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ci-administration-dialog-opened.flag");
                             File.WriteAllText(markerPath,
-                                "OPENED|" + DateTime.UtcNow.ToString("O") + "|Administration|" + selectedAction + "|DownloadOneChecked=" + one.Checked.ToString());
+                                "OPENED|" + DateTime.UtcNow.ToString("O") + "|" + title + "|DownloadOneChecked=True");
                         }
                         catch (Exception ex)
                         {
@@ -5477,53 +5821,44 @@ namespace ZeroTrace_Security_Official
                     };
                 }
 
-                dialog.ShowDialog(this);
+                dlg.ShowDialog(this);
             }
         }
 
-        private static RadioButton CreateAdministrationRadio(string caption, Point location, Color background, Color border, Color accent, Color text)
+        // Returns the best display label for a connection (Nickname@IP or just ID).
+        private string GetConnectionDisplayName(string connectionId)
         {
-            RadioButton radio = new RadioButton
+            if (gridView == null) return connectionId.Substring(0, Math.Min(12, connectionId.Length));
+            for (int r = 0; r < gridView.DataRowCount; r++)
             {
-                Text = string.Empty,
-                Tag = caption,
-                Location = location,
-                Size = new Size(174, 45),
-                BackColor = background,
-                ForeColor = text,
-                Font = new Font("Segoe UI", 8.75F, FontStyle.Regular, GraphicsUnit.Point),
-                FlatStyle = FlatStyle.Flat,
-                Appearance = System.Windows.Forms.Appearance.Normal,
-                Cursor = Cursors.Hand,
-                UseVisualStyleBackColor = false
-            };
-            radio.FlatAppearance.BorderSize = 0;
-            radio.Paint += delegate(object sender, PaintEventArgs e)
-            {
-                RadioButton rb = (RadioButton)sender;
-                e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                using (SolidBrush bg = new SolidBrush(rb.BackColor))
-                    e.Graphics.FillRectangle(bg, rb.ClientRectangle);
-
-                int dotCenterX = 14;
-                int dotCenterY = rb.ClientSize.Height / 2;
-                Rectangle ring = new Rectangle(dotCenterX - 8, dotCenterY - 8, 16, 16);
-                using (Pen ringPen = new Pen(Color.FromArgb(195, 201, 198), 1.4f))
-                    e.Graphics.DrawEllipse(ringPen, ring);
-                if (rb.Checked)
+                string cid = Convert.ToString(gridView.GetRowCellValue(r, "ConnectionId"));
+                if (string.Equals(cid, connectionId, StringComparison.Ordinal))
                 {
-                    using (SolidBrush dotBrush = new SolidBrush(accent))
-                        e.Graphics.FillEllipse(dotBrush, new Rectangle(dotCenterX - 4, dotCenterY - 4, 8, 8));
+                    string nick = Convert.ToString(gridView.GetRowCellValue(r, "Nickname"));
+                    string ip   = Convert.ToString(gridView.GetRowCellValue(r, "IP"));
+                    if (!string.IsNullOrWhiteSpace(nick) && nick != "Unknown")
+                        return nick + "@" + ip;
+                    return ip;
                 }
+            }
+            return connectionId.Substring(0, Math.Min(12, connectionId.Length));
+        }
 
-                string label = Convert.ToString(rb.Tag);
-                using (SolidBrush textBrush = new SolidBrush(rb.ForeColor))
-                    e.Graphics.DrawString(label, rb.Font, textBrush, new PointF(29, dotCenterY - rb.Font.Height / 2f + 1));
-            };
-            radio.CheckedChanged += delegate { radio.Invalidate(); };
-            radio.MouseEnter += delegate { radio.BackColor = Color.FromArgb(49, 51, 52); radio.Invalidate(); };
-            radio.MouseLeave += delegate { radio.BackColor = background; radio.Invalidate(); };
-            return radio;
+        // Retrieves the full list of currently-selected connection IDs from the grid.
+        private List<string> GetSelectedConnectionIdsList()
+        {
+            var ids = new List<string>();
+            if (gridView == null) return ids;
+            int[] rows = gridView.GetSelectedRows();
+            if (rows == null) return ids;
+            foreach (int rh in rows)
+            {
+                if (rh < 0) continue;
+                string cid = Convert.ToString(gridView.GetRowCellValue(rh, "ConnectionId"));
+                if (!string.IsNullOrWhiteSpace(cid) && !ids.Contains(cid))
+                    ids.Add(cid);
+            }
+            return ids;
         }
 
         private static System.Drawing.Drawing2D.GraphicsPath CreateRoundedRectanglePath(Rectangle bounds, int radius)

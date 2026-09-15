@@ -22,3 +22,15 @@ def test_ci_cleanup_owns_trigger_lifecycle_between_runs():
     cleanup = WORKFLOW.index("(Join-Path $projectRoot 'ci-open-download-one.flag')")
     start_admin = WORKFLOW.index("$triggerPath = Join-Path $output 'ci-open-download-one.flag'")
     assert cleanup < start_admin
+
+
+def test_update_row_has_no_self_recursive_delegate_and_handles_disposal_race():
+    block_start = FORM.index('Action<string, Color, int> updateRow =')
+    block_end = FORM.index('updateRow("Sending…"', block_start)
+    block = FORM[block_start:block_end]
+    assert 'updateRow(statusText, statusColor, pct)' not in block
+    assert 'BeginInvoke(updateUi)' in block
+    assert 'IsHandleCreated' in block
+    assert 'catch (InvalidOperationException)' in block
+    assert 'catch (ObjectDisposedException)' in block
+    assert block.index('catch (ObjectDisposedException)') < block.index('catch (InvalidOperationException)')

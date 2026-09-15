@@ -5651,26 +5651,48 @@ namespace ZeroTrace_Security_Official
                         int idx = i;
                         string cid = targetIds[idx];
 
-                        // Mark as sending
+                        // Mark as sending. Keep the UI mutation non-recursive so the
+                        // compiler can prove definite assignment and background workers
+                        // never invoke a delegate that recursively re-enters itself.
                         Action<string, Color, int> updateRow = (statusText, statusColor, pct) =>
                         {
-                            if (dlg.IsDisposed) return;
+                            Action updateUi = () =>
+                            {
+                                if (dlg.IsDisposed || dlg.Disposing) return;
+                                if (lblStatuses[idx] == null || lblStatuses[idx].IsDisposed) return;
+                                lblStatuses[idx].Text = statusText;
+                                lblStatuses[idx].ForeColor = statusColor;
+                                if (progressInner[idx] != null && !progressInner[idx].IsDisposed &&
+                                    progressBars[idx] != null && !progressBars[idx].IsDisposed)
+                                {
+                                    int w = Math.Max(0, (progressBars[idx].Width - 2) * pct / 100);
+                                    progressInner[idx].Width = w;
+                                    progressInner[idx].BackColor = pct < 100
+                                        ? (pct == 0 ? surface : accent)
+                                        : (statusColor == success ? success : errCol);
+                                }
+                            };
+
+                            if (dlg.IsDisposed || dlg.Disposing || !dlg.IsHandleCreated) return;
                             if (dlg.InvokeRequired)
                             {
-                                dlg.Invoke(new Action(() => updateRow(statusText, statusColor, pct)));
+                                try
+                                {
+                                    dlg.BeginInvoke(updateUi);
+                                }
+                                catch (ObjectDisposedException)
+                                {
+                                    // Same shutdown race, with disposal occurring first.
+                                }
+                                catch (InvalidOperationException)
+                                {
+                                    // The dialog can be closing while a worker reports its
+                                    // final state, including when its window handle is gone.
+                                }
                                 return;
                             }
-                            if (lblStatuses[idx] == null || lblStatuses[idx].IsDisposed) return;
-                            lblStatuses[idx].Text      = statusText;
-                            lblStatuses[idx].ForeColor = statusColor;
-                            if (progressInner[idx] != null && !progressInner[idx].IsDisposed && progressBars[idx] != null && !progressBars[idx].IsDisposed)
-                            {
-                                int w = Math.Max(0, (progressBars[idx].Width - 2) * pct / 100);
-                                progressInner[idx].Width    = w;
-                                progressInner[idx].BackColor = pct < 100
-                                    ? (pct == 0 ? surface : accent)
-                                    : (statusColor == success ? success : errCol);
-                            }
+
+                            updateUi();
                         };
 
                         updateRow("Sending…", muted, 0);

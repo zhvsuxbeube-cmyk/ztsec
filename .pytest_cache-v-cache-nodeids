@@ -1,0 +1,10 @@
+[
+  "tests/test_ztsec_agent.py::test_agent_does_not_register_block_command_source",
+  "tests/test_ztsec_agent.py::test_block_command_is_not_agent_supported",
+  "tests/test_ztsec_agent.py::test_command_ack_contract",
+  "tests/test_ztsec_agent.py::test_ed25519_public_key_matches_rfc8032_vector",
+  "tests/test_ztsec_agent.py::test_power_command_ack_without_invoking_windows",
+  "tests/test_ztsec_agent.py::test_power_command_returns_clean_error_off_windows",
+  "tests/test_ztsec_agent.py::test_retry_delay_is_fixed_five_seconds",
+  "tests/test_ztsec_agent.py::test_windows_fingerprint_shape_from_known_machine_value"
+]

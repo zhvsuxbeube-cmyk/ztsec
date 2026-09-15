@@ -5301,13 +5301,13 @@ namespace ZeroTrace_Security_Official
             {
                 dlg.BeginInvoke(updateOnUiThread);
             }
-            catch (InvalidOperationException)
-            {
-                // The dialog may be closing and its handle may no longer accept posted work.
-            }
             catch (ObjectDisposedException)
             {
                 // The dialog was disposed between the state check and BeginInvoke.
+            }
+            catch (InvalidOperationException)
+            {
+                // The dialog may be closing and its handle may no longer accept posted work.
             }
         }
 

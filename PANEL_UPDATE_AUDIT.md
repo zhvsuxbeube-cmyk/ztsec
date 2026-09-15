@@ -1,39 +1,21 @@
-# Panel Update/Remote Command Audit
+# Panel update / CI automation audit
 
-Date: 2026-09-15
+## Findings
 
-## Findings fixed
+### 1. CI trigger deletion race
+`SetupCiSmokeAutomation` and `SetupCiNotificationsAutomation` observed trigger files with `File.Exists` and then immediately called `File.Delete`. On Windows, an unrelated handle can still hold the file without delete sharing, so the delete can raise `IOException` with a sharing violation. The trigger is now treated as an immutable one-shot request; the consumed marker is the authoritative hand-off signal and CI cleanup removes triggers between runs. This avoids turning a diagnostic/automation file operation into a race.
 
-### 1. C# definite-assignment failure in `Form1.cs`
+### 2. File-command ACK race
+`ShowFileCommandDialog` previously sent the command before inserting its `(connection, command)` key into `pendingCommands`. A fast agent response could therefore be consumed by `HandleClient` before the sender-side polling state existed. Registration now occurs before the first socket write.
 
-The remote file-command dialog previously declared `updateRow` and referenced `updateRow` from inside its own lambda before definite assignment. MSBuild correctly rejected this as CS0165. The UI update operation is now a separate `UpdateFileCommandRow` method, so the worker delegate does not recursively reference an unassigned local.
+### 3. WinForms/DevExpress UI threading
+Worker threads marshal UI work with `BeginInvoke`; grid selection/data operations remain on the form UI thread. DevExpress documents that controls should not be accessed from non-UI threads without proper `Invoke`/`BeginInvoke` coordination.
 
-### 2. Pending-command registration race
+### 4. Catch ordering
+`ObjectDisposedException` handlers precede `InvalidOperationException` handlers because `ObjectDisposedException` derives from `InvalidOperationException`.
 
-The panel previously wrote the command to the `NetworkStream` and only then inserted the request into `pendingCommands`. A fast agent can acknowledge immediately after the final request byte arrives, so the server reader could consume the ACK before the pending entry existed. File commands now register their result state before any request bytes are written. Normal commands use the same ordering.
-
-### 3. Stale watchdog race
-
-Pending commands are keyed by connection and command. A previous timeout task could remove a newer request that reused the same key. Watchdog expiry now compares the exact `PendingCommand` instance before removing it.
-
-### 4. Successful-result retention
-
-`CompletePendingCommand` previously retained successful results for every command, even commands whose caller never polled `completedCommandResults`. File-command requests explicitly opt into result retention; ordinary commands do not.
-
-### 5. Worker/UI shutdown race
-
-The dialog's worker tasks can outlive the dialog. UI updates are now marshalled with `BeginInvoke` only when a handle exists, and disposal/handle-shutdown exceptions are handled. The update operation itself never recursively invokes the worker delegate.
-
-### 6. Selection-state concurrency
-
-`selectedConnectionIds` was modified by the client-handler worker while also being manipulated by UI selection code. Access is now guarded by `connectionStateLock`, and UI code snapshots the prior selection before requesting telemetry refreshes.
-
-## API research applied
-
-Microsoft WinForms documentation states that controls are thread-affine and cross-thread control operations must be marshalled; `Invoke` and `BeginInvoke` are the supported mechanisms. `BeginInvoke` can fail when no suitable handle exists or while the owning UI thread is no longer processing messages, so the update helper checks handle/disposal state and handles the shutdown race.
-
-DevExpress documentation confirms that `GridView.GetSelectedRows()` returns row handles for the active data View. The panel obtains selected connection IDs from the `GridView` on the UI thread before launching worker tasks; it does not read grid controls from the worker threads.
-
-## Verification expectations
-
-The Windows CI build remains authoritative for MSBuild/DevExpress compilation because this environment does not contain the Visual Studio/MSBuild toolchain. The repository now runs a Python source-contract regression before the Windows build, while the normal CI `msbuild /restore /t:Rebuild` remains the actual compiler check.
+## References
+- Microsoft: `File.Delete` documents that deletion can fail when a file is in use.
+- Microsoft: `FileShare` documents explicit sharing semantics for subsequent operations.
+- DevExpress: WinForms controls require proper UI-thread marshaling for multithreaded access.
+- DevExpress: `ColumnView.GetSelectedRows` / grid APIs are UI control APIs and should be used on the owning UI thread.

@@ -1,4 +1,7 @@
 [
+  "tests/test_panel_ci_and_update_contract.py::test_ci_automation_does_not_delete_live_trigger_from_worker",
+  "tests/test_panel_ci_and_update_contract.py::test_ci_cleanup_owns_trigger_lifecycle_between_runs",
+  "tests/test_panel_ci_and_update_contract.py::test_file_command_registers_pending_before_socket_write",
   "tests/test_ztsec_agent.py::test_agent_does_not_register_block_command_source",
   "tests/test_ztsec_agent.py::test_block_command_is_not_agent_supported",
   "tests/test_ztsec_agent.py::test_command_ack_contract",

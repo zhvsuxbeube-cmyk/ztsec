@@ -232,6 +232,20 @@ jobs:
 
           Write-Host 'JSON persistence and agent protocol validation: PASS'
 
+      - name: Validate panel update concurrency contracts
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $projectRoot = Join-Path $PWD $env:PROJECT_DIR
+          $panelTest = Join-Path $projectRoot 'tests\test_panel_update_contract.py'
+          $panelForm = Join-Path $projectRoot 'Form1.cs'
+          if (-not (Test-Path -LiteralPath $panelTest -PathType Leaf)) { throw 'Panel update contract tests are missing.' }
+          if (-not (Test-Path -LiteralPath $panelForm -PathType Leaf)) { throw 'Form1.cs is missing.' }
+          python $panelTest
+          if ($LASTEXITCODE -ne 0) { throw 'Panel update concurrency/source contract tests failed.' }
+          Write-Host 'Panel update concurrency contracts: PASS'
+
       - name: Validate UI theme source of truth
         shell: pwsh
         working-directory: ${{ github.workspace }}

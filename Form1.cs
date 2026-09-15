@@ -147,6 +147,7 @@ namespace ZeroTrace_Security_Official
             public string ConnectionId { get; set; }
             public string Command { get; set; }
             public DateTime SentAtUtc { get; set; }
+            public bool StoreResult { get; set; }
         }
 
         // Class to track each server instance
@@ -1952,7 +1953,8 @@ namespace ZeroTrace_Security_Official
 
             if (selectedRows == null)
             {
-                selectedConnectionIds.Clear();
+                lock (connectionStateLock)
+                    selectedConnectionIds.Clear();
                 HighlightClientOnMap(string.Empty);
                 return;
             }
@@ -1967,15 +1969,20 @@ namespace ZeroTrace_Security_Official
                     currentSelection.Add(connectionId);
             }
 
-            foreach (string connectionId in currentSelection)
+            HashSet<string> previousSelection;
+            lock (connectionStateLock)
             {
-                if (!selectedConnectionIds.Contains(connectionId))
-                    RequestTelemetryRefresh(connectionId);
+                previousSelection = new HashSet<string>(selectedConnectionIds, StringComparer.Ordinal);
+                selectedConnectionIds.Clear();
+                foreach (string connectionId in currentSelection)
+                    selectedConnectionIds.Add(connectionId);
             }
 
-            selectedConnectionIds.Clear();
             foreach (string connectionId in currentSelection)
-                selectedConnectionIds.Add(connectionId);
+            {
+                if (!previousSelection.Contains(connectionId))
+                    RequestTelemetryRefresh(connectionId);
+            }
         }
 
         private void RequestTelemetryRefresh(string connectionId)
@@ -2905,7 +2912,10 @@ namespace ZeroTrace_Security_Official
                     connectedClients.Remove(connectionId);
                 }
 
-                selectedConnectionIds.Remove(connectionId);
+                lock (connectionStateLock)
+                {
+                    selectedConnectionIds.Remove(connectionId);
+                }
                 ReportPendingCommandsOnDisconnect(connectionId);
                 lock (connectionStateLock)
                 {
@@ -5129,24 +5139,27 @@ namespace ZeroTrace_Security_Official
                     continue;
                 }
 
+                string pendingKey = TrackPendingCommand(connectionId, command);
                 try
                 {
                     NetworkStream stream = client.GetStream();
                     byte[] request = Encoding.UTF8.GetBytes("CMD:" + command + "\n");
                     stream.Write(request, 0, request.Length);
                     stream.Flush();
-                    TrackPendingCommand(connectionId, command);
                 }
                 catch (IOException)
                 {
+                    RemovePendingCommand(pendingKey);
                     LogFinalCommandResult(command, "failed: send error", LogType.Error);
                 }
                 catch (ObjectDisposedException)
                 {
+                    RemovePendingCommand(pendingKey);
                     LogFinalCommandResult(command, "failed: connection closed", LogType.Error);
                 }
                 catch (SocketException)
                 {
+                    RemovePendingCommand(pendingKey);
                     LogFinalCommandResult(command, "failed: socket error", LogType.Error);
                 }
             }
@@ -5166,29 +5179,136 @@ namespace ZeroTrace_Security_Official
             }
         }
 
-        private void TrackPendingCommand(string connectionId, string command)
+        private string RegisterPendingCommand(string connectionId, string command, bool storeResult)
         {
-            string key = connectionId + "|" + command.ToUpperInvariant();
+            string normalizedCommand = (command ?? string.Empty).Trim().ToUpperInvariant();
+            string key = connectionId + "|" + normalizedCommand;
+            PendingCommand pending = new PendingCommand
+            {
+                ConnectionId = connectionId,
+                Command = normalizedCommand,
+                SentAtUtc = DateTime.UtcNow,
+                StoreResult = storeResult
+            };
+
             lock (connectionStateLock)
             {
-                pendingCommands[key] = new PendingCommand
-                {
-                    ConnectionId = connectionId,
-                    Command = command.ToUpperInvariant(),
-                    SentAtUtc = DateTime.UtcNow
-                };
+                pendingCommands[key] = pending;
+                completedCommandResults.Remove(key);
             }
+
+            if (storeResult)
+                return key;
 
             Task.Run(delegate
             {
                 Thread.Sleep(4000);
                 lock (connectionStateLock)
                 {
-                    if (!pendingCommands.Remove(key))
+                    PendingCommand current;
+                    if (!pendingCommands.TryGetValue(key, out current) || !object.ReferenceEquals(current, pending))
                         return;
+                    pendingCommands.Remove(key);
                 }
-                LogFinalCommandResult(command, "ACK not received", LogType.Warning);
+                LogFinalCommandResult(normalizedCommand, "ACK not received", LogType.Warning);
             });
+
+            return key;
+        }
+
+        private string TrackPendingCommand(string connectionId, string command)
+        {
+            return RegisterPendingCommand(connectionId, command, false);
+        }
+
+        private string TrackPendingFileCommand(string connectionId, string command)
+        {
+            return RegisterPendingCommand(connectionId, command, true);
+        }
+
+        private void RemovePendingCommand(string key)
+        {
+            if (string.IsNullOrEmpty(key))
+                return;
+
+            lock (connectionStateLock)
+            {
+                pendingCommands.Remove(key);
+                completedCommandResults.Remove(key);
+            }
+        }
+
+        private static void UpdateFileCommandRow(
+            Control dlg,
+            Label[] labels,
+            Panel[] progressBars,
+            Panel[] progressInner,
+            int index,
+            string statusText,
+            Color statusColor,
+            int pct,
+            Color surface,
+            Color accent,
+            Color success,
+            Color errCol)
+        {
+            if (dlg == null || dlg.IsDisposed || dlg.Disposing)
+                return;
+
+            Action updateOnUiThread = delegate
+            {
+                if (dlg.IsDisposed || dlg.Disposing)
+                    return;
+
+                if (labels == null || index < 0 || index >= labels.Length)
+                    return;
+
+                Label statusLabel = labels[index];
+                if (statusLabel == null || statusLabel.IsDisposed || statusLabel.Disposing)
+                    return;
+
+                statusLabel.Text = statusText;
+                statusLabel.ForeColor = statusColor;
+
+                if (progressInner == null || index >= progressInner.Length ||
+                    progressBars == null || index >= progressBars.Length)
+                    return;
+
+                Panel inner = progressInner[index];
+                Panel outer = progressBars[index];
+                if (inner == null || inner.IsDisposed || inner.Disposing ||
+                    outer == null || outer.IsDisposed || outer.Disposing)
+                    return;
+
+                int clampedPct = Math.Max(0, Math.Min(100, pct));
+                int width = Math.Max(0, (outer.Width - 2) * clampedPct / 100);
+                inner.Width = width;
+                inner.BackColor = clampedPct < 100
+                    ? (clampedPct == 0 ? surface : accent)
+                    : (statusColor == success ? success : errCol);
+            };
+
+            if (!dlg.InvokeRequired)
+            {
+                updateOnUiThread();
+                return;
+            }
+
+            if (!dlg.IsHandleCreated)
+                return;
+
+            try
+            {
+                dlg.BeginInvoke(updateOnUiThread);
+            }
+            catch (InvalidOperationException)
+            {
+                // The dialog may be closing and its handle may no longer accept posted work.
+            }
+            catch (ObjectDisposedException)
+            {
+                // The dialog was disposed between the state check and BeginInvoke.
+            }
         }
 
         private void LogFinalCommandResult(string command, string outcome, LogType type)
@@ -5200,20 +5320,20 @@ namespace ZeroTrace_Security_Official
         private void CompletePendingCommand(string connectionId, string command, bool acknowledged)
         {
             string key = connectionId + "|" + command.ToUpperInvariant();
-            bool wasPending;
+            PendingCommand pending = null;
             lock (connectionStateLock)
             {
-                wasPending = pendingCommands.Remove(key);
-                if (wasPending)
+                if (pendingCommands.TryGetValue(key, out pending))
                 {
-                    // Record result so file-command dialogs can poll the outcome.
-                    completedCommandResults[key] = acknowledged;
+                    pendingCommands.Remove(key);
+                    if (pending.StoreResult)
+                        completedCommandResults[key] = acknowledged;
                 }
             }
 
             // A timeout or disconnect may already have produced the final result.
             // Ignore any late acknowledgement so Server Logs contains one row per command.
-            if (!wasPending)
+            if (pending == null)
                 return;
 
             LogFinalCommandResult(command, acknowledged ? "succeeded" : "failed: agent returned an error",
@@ -5667,27 +5787,25 @@ namespace ZeroTrace_Security_Official
                         int idx = i;
                         string cid = targetIds[idx];
 
-                        // Mark as sending
-                        Action<string, Color, int> updateRow = (statusText, statusColor, pct) =>
-                        {
-                            if (dlg.IsDisposed) return;
-                            if (dlg.InvokeRequired)
+                        // Mark as sending. File-command workers must marshal all
+                        // Control updates back to the dialog's UI thread.
+                        Action<string, Color, int> updateRow =
+                            delegate(string statusText, Color statusColor, int pct)
                             {
-                                dlg.Invoke(new Action(() => updateRow(statusText, statusColor, pct)));
-                                return;
-                            }
-                            if (lblStatuses[idx] == null || lblStatuses[idx].IsDisposed) return;
-                            lblStatuses[idx].Text      = statusText;
-                            lblStatuses[idx].ForeColor = statusColor;
-                            if (progressInner[idx] != null && !progressInner[idx].IsDisposed && progressBars[idx] != null && !progressBars[idx].IsDisposed)
-                            {
-                                int w = Math.Max(0, (progressBars[idx].Width - 2) * pct / 100);
-                                progressInner[idx].Width    = w;
-                                progressInner[idx].BackColor = pct < 100
-                                    ? (pct == 0 ? surface : accent)
-                                    : (statusColor == success ? success : errCol);
-                            }
-                        };
+                                UpdateFileCommandRow(
+                                    dlg,
+                                    lblStatuses,
+                                    progressBars,
+                                    progressInner,
+                                    idx,
+                                    statusText,
+                                    statusColor,
+                                    pct,
+                                    surface,
+                                    accent,
+                                    success,
+                                    errCol);
+                            };
 
                         updateRow("Sending…", muted, 0);
 
@@ -5705,9 +5823,13 @@ namespace ZeroTrace_Security_Official
 
                             try
                             {
+                                // Register before writing so a fast ACK can never
+                                // arrive before HandleClient knows where to put it.
+                                string resultKey = TrackPendingFileCommand(cid, cmdKey);
+
                                 NetworkStream ns = tcpClient.GetStream();
 
-                                // Stream the raw bytes with fake progress ticks
+                                // Stream the raw bytes with progress ticks
                                 int total   = rawBytes.Length;
                                 int chunk   = Math.Max(4096, total / 20);
                                 int sent    = 0;
@@ -5723,22 +5845,7 @@ namespace ZeroTrace_Security_Official
 
                                 updateRow("Awaiting response…", muted, 96);
 
-                                // Register in pendingCommands so HandleClient's ACK/ERR
-                                // path reaches CompletePendingCommand and stores the result.
-                                // We do NOT call TrackPendingCommand() because its 4-second
-                                // internal watchdog would fire before the update finishes.
-                                string resultKey = cid + "|" + cmdKey.ToUpperInvariant();
-                                lock (connectionStateLock)
-                                {
-                                    pendingCommands[resultKey] = new PendingCommand
-                                    {
-                                        ConnectionId = cid,
-                                        Command      = cmdKey.ToUpperInvariant(),
-                                        SentAtUtc    = DateTime.UtcNow
-                                    };
-                                }
-
-                                // Wait up to 30 s for ACK or ERR
+                                // Wait up to 30 s for ACK or ERR.
                                 DateTime deadline = DateTime.UtcNow.AddSeconds(30);
                                 bool? ackResult = null;
                                 while (DateTime.UtcNow < deadline)
@@ -5784,7 +5891,9 @@ namespace ZeroTrace_Security_Official
                             }
                             catch (Exception ex)
                             {
-                                updateRow("Error: " + ex.Message, errCol, 0);
+                                string failedKey = cid + "|" + cmdKey.ToUpperInvariant();
+                                RemovePendingCommand(failedKey);
+                                updateRow("Error: " + ex.Message, errCol, 100);
                             }
                         });
                     }

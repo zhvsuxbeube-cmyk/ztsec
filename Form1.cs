@@ -5253,7 +5253,8 @@ namespace ZeroTrace_Security_Official
                         throw new InvalidOperationException("File is empty.");
                     string b64 = Convert.ToBase64String(bytes);
                     return ("CMD:EXECUTE:" + ext + ":" + b64, "EXECUTE:");
-                });
+                },
+                ciAutomationMarker: "Administration|Download [ One ]");
         }
 
         // ── Remote Update Dialog ─────────────────────────────────────────────────
@@ -5305,7 +5306,8 @@ namespace ZeroTrace_Security_Official
             string fileFilter,
             string actionLabel,
             List<string> targetIds,
-            Func<string, (string command, string commandKey)> buildCommand)
+            Func<string, (string command, string commandKey)> buildCommand,
+            string ciAutomationMarker = null)
         {
             const int W = 660;
             Color window   = Color.FromArgb(28, 30, 31);
@@ -5815,8 +5817,11 @@ namespace ZeroTrace_Security_Official
                         try
                         {
                             string markerPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ci-administration-dialog-opened.flag");
+                            string marker = string.IsNullOrWhiteSpace(ciAutomationMarker)
+                                ? title
+                                : ciAutomationMarker + "|Dialog=" + title;
                             File.WriteAllText(markerPath,
-                                "OPENED|" + DateTime.UtcNow.ToString("O") + "|" + title + "|DownloadOneChecked=True");
+                                "OPENED|" + DateTime.UtcNow.ToString("O") + "|" + marker + "|DownloadOneChecked=True");
                         }
                         catch (Exception ex)
                         {

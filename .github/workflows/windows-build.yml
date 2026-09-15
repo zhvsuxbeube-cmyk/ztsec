@@ -886,7 +886,7 @@ jobs:
             }
             if (Test-Path -LiteralPath $adminMarker -PathType Leaf) {
               $markerText = Get-Content -LiteralPath $adminMarker -Raw
-              if ($markerText -match '^OPENED\|.*\|Administration\|Download \[ One \]\|DownloadOneChecked=True\s*$') {
+              if ($markerText -match '^OPENED\|.*\|Administration\|Download \[ One \]\|Dialog=Remote Execution\|DownloadOneChecked=True\s*$') {
                 $dialogReady = $true
                 break
               }

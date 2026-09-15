@@ -34,3 +34,9 @@ def test_update_row_has_no_self_recursive_delegate_and_handles_disposal_race():
     assert 'catch (InvalidOperationException)' in block
     assert 'catch (ObjectDisposedException)' in block
     assert block.index('catch (ObjectDisposedException)') < block.index('catch (InvalidOperationException)')
+
+
+def test_ci_administration_marker_matches_real_menu_action_and_dialog():
+    assert 'ciAutomationMarker: "Administration|Download [ One ]"' in FORM
+    assert '"|Dialog=" + title' in FORM
+    assert 'Administration\|Download \[ One \]\|Dialog=Remote Execution' in WORKFLOW

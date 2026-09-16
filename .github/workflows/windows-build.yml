@@ -920,8 +920,8 @@ jobs:
           # The dialog is modal and has just raised its Shown event, so leave it in
           # the foreground. Capturing the main window rectangle therefore records
           # the full GUI with the Administration dialog over it.
-          # The application-owned Rendered=True marker is emitted only after one UI turn
-          # and an explicit layout/paint update. Give the compositor a short additional
+          # The application-owned Rendered=True marker is emitted only after two queued
+          # UI turns and explicit layout/paint updates. Give the compositor a short additional
           # settling period before capture; this is intentionally sub-second, not a long sleep.
           Start-Sleep -Milliseconds 700
           Capture-GuiPng $hwnd (Join-Path $PWD 'gui-screenshot-2.png')

@@ -5343,8 +5343,12 @@ namespace ZeroTrace_Security_Official
             {
                 PendingCommand current;
                 if (pendingCommands.TryGetValue(key, out current) && current.Id == pendingId)
+                {
                     pendingCommands.Remove(key);
-                completedCommandResults.Remove(key);
+                    completedCommandResults.Remove(key);
+                }
+                // If the pending entry was already completed by the receive thread,
+                // preserve its completed result so the command waiter can consume it.
             }
         }
 
@@ -5803,7 +5807,11 @@ namespace ZeroTrace_Security_Official
                         row["Status"] = statusText;
                         row["Progress"] = Math.Max(0, Math.Min(100, pct));
                         commandStatusColors[rowIndex] = statusColor;
-                        if (commandGridView != null && !commandGridView.IsDisposed)
+                        if (commandGridView != null
+                            && !commandGridView.IsDisposing
+                            && commandGrid != null
+                            && !commandGrid.IsDisposed
+                            && !commandGrid.Disposing)
                             commandGridView.RefreshRow(rowIndex);
                     };
 
@@ -5896,6 +5904,10 @@ namespace ZeroTrace_Security_Official
 
                         Task.Run(() =>
                         {
+                            string resultKey = cid + "|" + cmdKey.ToUpperInvariant();
+                            Guid pendingId = Guid.Empty;
+                            bool isUpdateCommand = string.Equals(cmdKey, "UPDATE:", StringComparison.OrdinalIgnoreCase);
+
                             TcpClient tcpClient = null;
                             lock (connectionStateLock)
                                 connectedClients.TryGetValue(cid, out tcpClient);
@@ -5909,10 +5921,7 @@ namespace ZeroTrace_Security_Official
                             try
                             {
                                 NetworkStream ns = tcpClient.GetStream();
-
-                                string resultKey = cid + "|" + cmdKey.ToUpperInvariant();
-                                Guid pendingId = Guid.NewGuid();
-                                bool isUpdateCommand = string.Equals(cmdKey, "UPDATE:", StringComparison.OrdinalIgnoreCase);
+                                pendingId = Guid.NewGuid();
                                 lock (connectionStateLock)
                                 {
                                     pendingCommands[resultKey] = new PendingCommand
@@ -6019,52 +6028,74 @@ namespace ZeroTrace_Security_Official
                 {
                     dlg.Shown += (s, e) =>
                     {
-                        // Shown occurs before the first paint. Queue one UI turn so the
-                        // modal window and DevExpress grid have completed layout/data binding
-                        // before CI considers the screenshot state ready.
+                        // Shown fires before the next paint. Use two queued UI turns so
+                        // the modal form, DataTable binding, grid columns, and progress
+                        // editor have all completed their initial layout before CI captures.
                         try
                         {
                             dlg.BeginInvoke(new Action(delegate
                             {
                                 try
                                 {
-                                    if (!dlg.IsDisposed && !dlg.Disposing)
-                                    {
-                                        dlg.Activate();
-                                        dlg.BringToFront();
-                                    }
+                                    if (dlg.IsDisposed || dlg.Disposing)
+                                        return;
+
+                                    dlg.Activate();
+                                    dlg.BringToFront();
+                                    dlg.PerformLayout();
                                     commandGridView.LayoutChanged();
                                     commandGrid.RefreshDataSource();
                                     commandGrid.Update();
-                                    dlg.PerformLayout();
                                     dlg.Update();
                                     dlg.Refresh();
 
-                                    string markerPath = Path.Combine(
-                                        AppDomain.CurrentDomain.BaseDirectory,
-                                        "ci-administration-dialog-opened.flag");
-                                    File.WriteAllText(
-                                        markerPath,
-                                        "OPENED|" + DateTime.UtcNow.ToString("O")
-                                        + "|Administration|Download [ One ]|Dialog=" + title
-                                        + "|DownloadOneChecked=True|Rendered=True");
+                                    dlg.BeginInvoke(new Action(delegate
+                                    {
+                                        try
+                                        {
+                                            if (dlg.IsDisposed || dlg.Disposing)
+                                                return;
+
+                                            dlg.PerformLayout();
+                                            commandGridView.LayoutChanged();
+                                            commandGrid.RefreshDataSource();
+                                            commandGrid.Update();
+                                            dlg.Update();
+                                            dlg.Refresh();
+
+                                            string markerPath = Path.Combine(
+                                                AppDomain.CurrentDomain.BaseDirectory,
+                                                "ci-administration-dialog-opened.flag");
+                                            File.WriteAllText(
+                                                markerPath,
+                                                "OPENED|" + DateTime.UtcNow.ToString("O")
+                                                + "|Administration|Download [ One ]|Dialog=" + title
+                                                + "|DownloadOneChecked=True|Rendered=True");
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            LogToMonitor(
+                                                "CI administration dialog verification failed: " + ex.Message,
+                                                LogType.Error);
+                                            try
+                                            {
+                                                string errorPath = Path.Combine(
+                                                    AppDomain.CurrentDomain.BaseDirectory,
+                                                    "ci-administration-automation-error.txt");
+                                                File.WriteAllText(
+                                                    errorPath,
+                                                    "DIALOG_RENDER_FAILED|"
+                                                    + DateTime.UtcNow.ToString("O") + "|" + ex);
+                                            }
+                                            catch { }
+                                        }
+                                    }));
                                 }
                                 catch (Exception ex)
                                 {
                                     LogToMonitor(
-                                        "CI administration dialog verification failed: " + ex.Message,
+                                        "CI administration dialog verification scheduling failed: " + ex.Message,
                                         LogType.Error);
-                                    try
-                                    {
-                                        string errorPath = Path.Combine(
-                                            AppDomain.CurrentDomain.BaseDirectory,
-                                            "ci-administration-automation-error.txt");
-                                        File.WriteAllText(
-                                            errorPath,
-                                            "DIALOG_RENDER_FAILED|"
-                                            + DateTime.UtcNow.ToString("O") + "|" + ex);
-                                    }
-                                    catch { }
                                 }
                             }));
                         }
@@ -6215,7 +6246,18 @@ namespace ZeroTrace_Security_Official
             // across DevExpress versions/skins).
             if (string.Equals(Environment.GetEnvironmentVariable("ZTSEC_CI_SMOKE"), "1", StringComparison.Ordinal))
             {
-                BeginInvoke(new Action(MarkCiConnectionsPopupIfOpen));
+                // The Opened state can be true before the native popup has completed
+                // its first layout/paint pass. Defer the CI marker by two UI turns so
+                // the screenshot gate observes an actually rendered DevExpress popup.
+                BeginInvoke(new Action(delegate
+                {
+                    try
+                    {
+                        BeginInvoke(new Action(MarkCiConnectionsPopupIfOpen));
+                    }
+                    catch (ObjectDisposedException) { }
+                    catch (InvalidOperationException) { }
+                }));
             }
         }
 

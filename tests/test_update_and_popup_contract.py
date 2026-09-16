@@ -109,3 +109,39 @@ def test_ci_timeout_diagnostic_reflects_retained_trigger():
     assert 'trigger consumed (application-side watcher observed it)' in workflow
     assert 'trigger file absent but no consume marker was observed' in workflow
     assert '$triggerStatus = if (Test-Path -LiteralPath $notificationsTrigger -PathType Leaf)' in workflow
+
+
+def test_popup_uses_supported_devexpress_dispose_api_and_scoped_async_state():
+    assert 'commandGridView.IsDisposing' in FORM
+    assert 'commandGrid.IsDisposed' in FORM
+    assert 'Guid pendingId = Guid.Empty;' in FORM
+    assert 'string resultKey = cid + "|" + cmdKey.ToUpperInvariant();' in FORM
+    assert 'bool isUpdateCommand = string.Equals(cmdKey, "UPDATE:", StringComparison.OrdinalIgnoreCase);' in FORM
+    # The catch block must be able to see the state even when GetStream()/setup throws.
+    task_start = FORM.index('Task.Run(() =>', FORM.index('private void ShowFileCommandDialog'))
+    catch_start = FORM.index('catch (Exception ex)', task_start)
+    section = FORM[task_start:catch_start]
+    assert section.index('string resultKey =') < section.index('try')
+    assert section.index('Guid pendingId =') < section.index('try')
+
+
+def test_popup_does_not_use_unsupported_gridview_isdisposed_property():
+    assert 'commandGridView.IsDisposed' not in FORM
+    assert 'commandGridView.IsDisposing' in FORM
+    assert 'commandGrid.IsDisposed' in FORM
+
+
+def test_ci_screenshot_marker_waits_for_two_ui_turns():
+    marker = FORM.index('ci-connections-menu-opened.flag')
+    section_start = FORM.rfind('private void connectionsContextMenu_Opening', 0, marker)
+    section = FORM[section_start:marker]
+    assert section.count('BeginInvoke(new Action(delegate') >= 1
+    assert 'BeginInvoke(new Action(MarkCiConnectionsPopupIfOpen))' in section
+
+
+def test_administration_render_marker_is_after_second_ui_turn():
+    start = FORM.index('ci-administration-dialog-opened.flag')
+    section_start = FORM.rfind('dlg.Shown +=', 0, start)
+    section = FORM[section_start:start]
+    assert section.count('dlg.BeginInvoke(new Action(delegate') >= 2
+    assert 'Rendered=True' in FORM[start - 400:start + 500]

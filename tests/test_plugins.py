@@ -1,12 +1,14 @@
 from pathlib import Path
 import re
+import os
 
 ROOT = Path(__file__).resolve().parents[1]
 FORM = (ROOT / "Form1.cs").read_text(encoding="utf-8")
 MANAGER = (ROOT / "PluginManager.cs").read_text(encoding="utf-8")
 CONTRACTS = (ROOT / "PluginContracts.cs").read_text(encoding="utf-8")
-AGENT = (ROOT.parent / "agent" / "src" / "net.rs").read_text(encoding="utf-8")
-HEADER = (ROOT.parent / "agent" / "plugin" / "ztsec_plugin.h").read_text(encoding="utf-8")
+AGENT_ROOT = Path(os.environ.get("ZTSEC_AGENT_ROOT", str(ROOT.parent / "agent")))
+AGENT = (AGENT_ROOT / "src" / "net.rs").read_text(encoding="utf-8")
+HEADER = (AGENT_ROOT / "plugin" / "ztsec_plugin.h").read_text(encoding="utf-8")
 
 
 def test_plugin_name_rules_are_strict():
@@ -55,3 +57,21 @@ def test_agent_plugin_transport_supports_generic_messages_and_chunked_files():
     assert '256 * 1024 * 1024' in AGENT
     assert '128 * 1024' in AGENT
     assert 'ZT_EVENT_FILE_SEND_CHUNK' in HEADER
+
+
+def test_example_file_explorer_plugin_is_present_and_generic_api_based():
+    server = (ROOT / "plugin-sdk" / "ExampleServer.cs").read_text(encoding="utf-8")
+    client = (AGENT_ROOT / "plugin" / "example_explorer.cpp").read_text(encoding="utf-8")
+    assert "ExampleFileExplorer" in server
+    assert "Application.Run(form)" in server
+    assert 'context.SendText' in server
+    for token in ["PluginOnLoad", "PluginOnEvent", "PluginOnUnload", "explorer.drives", "explorer.entries"]:
+        assert token in client
+
+
+def test_panel_compile_hazards_are_corrected():
+    assert 'LogType.Data);' not in FORM
+    assert 'using (AppDomain inspector' not in MANAGER
+    assert 'string validatedPluginName' in MANAGER
+    assert 'SendFileChunk(string connectionId, string transferId, long offset, byte[] chunk, long totalLength, string sha256)' in MANAGER
+    assert 'PrefixEvent("file.send.chunk", framed)' in MANAGER

@@ -31,7 +31,7 @@ namespace ZeroTrace_Security_Official
         private readonly Func<string, string, string, bool> sendText;
         private readonly Func<string, string, byte[], bool> sendBytes;
         private readonly Func<string, string, bool> unloadClient;
-        private readonly Func<string, string, string, bool> sendFile;
+        private readonly Func<string, string, string, string, bool> sendFile;
         private readonly Func<string, string, string, long, string, bool> beginReceive;
         private readonly Func<string, string, bool> completeReceive;
         private readonly Action<string> log;
@@ -41,7 +41,7 @@ namespace ZeroTrace_Security_Official
             Func<string, string, string, bool> sendText,
             Func<string, string, byte[], bool> sendBytes,
             Func<string, string, bool> unloadClient,
-            Func<string, string, string, bool> sendFile,
+            Func<string, string, string, string, bool> sendFile,
             Func<string, string, string, long, string, bool> beginReceive,
             Func<string, string, bool> completeReceive,
             Action<string> log)
@@ -67,12 +67,13 @@ namespace ZeroTrace_Security_Official
             if (string.IsNullOrWhiteSpace(serverPath) || !File.Exists(serverPath)) { error = "Plugin server file does not exist."; return false; }
             Match match = ServerNameRegex.Match(Path.GetFileName(serverPath));
             if (!match.Success) { error = "Server DLL must use pluginname.server.dll with letters/numbers only in pluginname."; return false; }
-            pluginName = match.Groups["name"].Value;
+            string validatedPluginName = match.Groups["name"].Value;
+            pluginName = validatedPluginName;
             string directory = Path.GetDirectoryName(serverPath) ?? string.Empty;
             clientPath = Directory.GetFiles(directory, "*.client.dll", SearchOption.TopDirectoryOnly)
                 .FirstOrDefault(p => {
                     Match m = ClientNameRegex.Match(Path.GetFileName(p));
-                    return m.Success && string.Equals(m.Groups["name"].Value, pluginName, StringComparison.OrdinalIgnoreCase);
+                    return m.Success && string.Equals(m.Groups["name"].Value, validatedPluginName, StringComparison.OrdinalIgnoreCase);
                 });
             if (clientPath == null) { error = "Matching pluginname.client.dll was not found in the same directory."; return false; }
             try
@@ -96,12 +97,17 @@ namespace ZeroTrace_Security_Official
             try
             {
                 string typeName, version;
-                using (AppDomain inspector = AppDomain.CreateDomain("ZTSecPluginInspect_" + Guid.NewGuid().ToString("N")))
+                AppDomain inspector = AppDomain.CreateDomain("ZTSecPluginInspect_" + Guid.NewGuid().ToString("N"));
+                try
                 {
                     PluginLoader loader = (PluginLoader)inspector.CreateInstanceFromAndUnwrap(typeof(PluginLoader).Assembly.Location, typeof(PluginLoader).FullName);
                     PluginDescriptor descriptor = loader.Describe(serverPath);
                     if (descriptor == null) throw new InvalidDataException("No public IZtsecPluginServer implementation with a parameterless constructor was found.");
                     typeName = descriptor.TypeName; version = descriptor.Version;
+                }
+                finally
+                {
+                    try { AppDomain.Unload(inspector); } catch { }
                 }
                 loaded = new LoadedPlugin { Name = name, Version = string.IsNullOrWhiteSpace(version) ? "1.0" : version, ServerPath = serverPath, ClientPath = clientPath, TypeName = typeName, Running = false };
                 lock (sync) plugins.Add(name, loaded);
@@ -137,9 +143,21 @@ namespace ZeroTrace_Security_Official
         {
             LoadedPlugin plugin;
             lock (sync) if (!plugins.TryGetValue(name, out plugin)) return false;
-            try { plugin.Server.Shutdown(); } catch (Exception ex) { log("Plugin shutdown failed: " + ex.Message); }
-            try { AppDomain.Unload(plugin.Domain); } catch (Exception ex) { log("Plugin AppDomain unload failed: " + ex.Message); }
-            lock (sync) plugins.Remove(name);
+            if (plugin.Running && plugin.Server != null)
+            {
+                try { plugin.Server.Shutdown(); } catch (Exception ex) { log("Plugin shutdown failed: " + ex.Message); }
+            }
+            if (plugin.Domain != null)
+            {
+                try { AppDomain.Unload(plugin.Domain); } catch (Exception ex) { log("Plugin AppDomain unload failed: " + ex.Message); }
+            }
+            lock (sync)
+            {
+                plugin.Domain = null;
+                plugin.Server = null;
+                plugin.Running = false;
+                plugins.Remove(name);
+            }
             return true;
         }
 
@@ -166,12 +184,26 @@ namespace ZeroTrace_Security_Official
             private readonly string pluginName;
             public PluginContext(ZtsecPluginManager owner, string pluginName) { this.owner = owner; this.pluginName = pluginName; }
             public ZtsecPluginConnection[] GetConnections() => owner.connectionSnapshot();
-            public bool LoadClient(string connectionId) => owner.sendFile(connectionId, pluginName, owner.ServerClientPath(pluginName));
+            public bool LoadClient(string connectionId)
+            {
+                string path = owner.ServerClientPath(pluginName);
+                return !string.IsNullOrWhiteSpace(path) && owner.sendFile(connectionId, pluginName, path, Path.GetFileName(path));
+            }
             public bool UnloadClient(string connectionId) => owner.unloadClient(connectionId, pluginName);
             public bool SendText(string connectionId, string eventName, string text) => owner.sendBytes(connectionId, pluginName, PrefixEvent(eventName, System.Text.Encoding.UTF8.GetBytes(text ?? string.Empty)));
             public bool SendBytes(string connectionId, string eventName, byte[] payload) => owner.sendBytes(connectionId, pluginName, PrefixEvent(eventName, payload));
-            public bool SendFile(string connectionId, string localPath, string remoteName) => owner.sendFile(connectionId, pluginName, localPath);
-            public bool SendFileChunk(string connectionId, string transferId, long offset, byte[] chunk, long totalLength, string sha256) => owner.sendBytes(connectionId, pluginName, chunk);
+            public bool SendFile(string connectionId, string localPath, string remoteName) => owner.sendFile(connectionId, pluginName, localPath, remoteName);
+            public bool SendFileChunk(string connectionId, string transferId, long offset, byte[] chunk, long totalLength, string sha256)
+            {
+                if (string.IsNullOrWhiteSpace(transferId) || offset < 0 || totalLength <= 0 || string.IsNullOrWhiteSpace(sha256)) return false;
+                string header = transferId + "|" + offset + "|" + totalLength + "|" + sha256 + "\n";
+                byte[] prefix = System.Text.Encoding.UTF8.GetBytes(header);
+                byte[] value = chunk ?? new byte[0];
+                byte[] framed = new byte[prefix.Length + value.Length];
+                Buffer.BlockCopy(prefix, 0, framed, 0, prefix.Length);
+                Buffer.BlockCopy(value, 0, framed, prefix.Length, value.Length);
+                return owner.sendBytes(connectionId, pluginName, PrefixEvent("file.send.chunk", framed));
+            }
             public string BeginFileReceive(string connectionId, string transferId, string fileName, long totalLength, string sha256) => owner.beginReceive(connectionId, transferId, fileName, totalLength, sha256) ? transferId : null;
             public bool CompleteFileReceive(string connectionId, string transferId) => owner.completeReceive(connectionId, transferId);
             public void Log(string message) => owner.log("[Plugin " + pluginName + "] " + message);

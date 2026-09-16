@@ -72,9 +72,6 @@ namespace ZeroTrace_Security_Official
         private DevExpress.XtraBars.BarButtonItem connectionsBlockItem;
         private DevExpress.XtraBars.BarButtonItem connectionsExecuteItem;
         private DevExpress.XtraBars.BarButtonItem connectionsDownloadUpdateItem;
-        private DevExpress.XtraBars.BarButtonItem connectionsExPlugin1Item;
-        private DevExpress.XtraBars.BarButtonItem connectionsExPlugin2Item;
-        private DevExpress.XtraBars.BarButtonItem connectionsExPlugin3Item;
         private DevExpress.XtraBars.BarButtonItem connectionsSleepItem;
         private DevExpress.XtraBars.BarButtonItem connectionsHibernateItem;
         private DevExpress.XtraBars.BarButtonItem connectionsRestartItem;
@@ -242,7 +239,7 @@ namespace ZeroTrace_Security_Official
             KeyDown += Form1_KeyDown;
 
             InitializeAdditionalNavigationPages();
-            pluginManager = new ZtsecPluginManager(GetPluginConnectionSnapshot, SendPluginText, SendPluginBytes, UnloadPluginClient, SendPluginFile, BeginPluginReceive, CompletePluginReceive, delegate(string message) { LogServerEvent(message, LogType.Data); });
+            pluginManager = new ZtsecPluginManager(GetPluginConnectionSnapshot, SendPluginText, SendPluginBytes, UnloadPluginClient, SendPluginFile, BeginPluginReceive, CompletePluginReceive, delegate(string message) { LogServerEvent(message, LogType.DataTransfer); });
             InitializePluginManagerPage();
             ConfigureDynamicPluginMenu();
             this.FormClosed += delegate { try { pluginManager.StopAll(); } catch { } };
@@ -4292,6 +4289,12 @@ namespace ZeroTrace_Security_Official
             pluginManagerTable.Columns.Add("Server", typeof(string));
             pluginManagerTable.Columns.Add("Client", typeof(string));
             pluginManagerTable.Columns.Add("Status", typeof(string));
+            pluginManagerGridView.OptionsBehavior.AutoPopulateColumns = false;
+            pluginManagerGridView.Columns.AddVisible("Plugin", "Plugin");
+            pluginManagerGridView.Columns.AddVisible("Version", "Version");
+            pluginManagerGridView.Columns.AddVisible("Server", "Server DLL");
+            pluginManagerGridView.Columns.AddVisible("Client", "Client DLL");
+            pluginManagerGridView.Columns.AddVisible("Status", "Status");
             pluginManagerGrid.DataSource = pluginManagerTable;
             pluginManagerGridView.OptionsBehavior.Editable = false;
             pluginManagerGridView.OptionsSelection.MultiSelect = true;
@@ -4473,7 +4476,7 @@ namespace ZeroTrace_Security_Official
             }
         }
 
-        private bool SendPluginFile(string connectionId, string pluginName, string localPath)
+        private bool SendPluginFile(string connectionId, string pluginName, string localPath, string remoteName)
         {
             if (string.IsNullOrWhiteSpace(localPath) || !File.Exists(localPath)) return false;
             FileInfo info = new FileInfo(localPath);
@@ -4483,7 +4486,7 @@ namespace ZeroTrace_Security_Official
             using (FileStream fs = File.OpenRead(localPath))
                 hash = BitConverter.ToString(sha.ComputeHash(fs)).Replace("-", "").ToLowerInvariant();
             string transferId = hash;
-            if (!SendPluginRaw(connectionId, "CMD:PLUGIN_BEGIN:" + pluginName + ":" + transferId + ":" + info.Length + ":" + hash + ":" + Path.GetFileName(localPath), "PLUGIN_BEGIN:" + transferId)) return false;
+            if (!SendPluginRaw(connectionId, "CMD:PLUGIN_BEGIN:" + pluginName + ":" + transferId + ":" + info.Length + ":" + hash + ":" + (string.IsNullOrWhiteSpace(remoteName) ? Path.GetFileName(localPath) : Path.GetFileName(remoteName)), "PLUGIN_BEGIN:" + transferId)) return false;
             const int chunk = 128 * 1024;
             byte[] buffer = new byte[chunk];
             using (FileStream fs = File.OpenRead(localPath))

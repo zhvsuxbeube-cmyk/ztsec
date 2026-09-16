@@ -145,3 +145,15 @@ def test_administration_render_marker_is_after_second_ui_turn():
     section = FORM[section_start:start]
     assert section.count('dlg.BeginInvoke(new Action(delegate') >= 2
     assert 'Rendered=True' in FORM[start - 400:start + 500]
+
+
+def test_popup_columns_are_created_explicitly_before_datasource_binding():
+    section_start = FORM.index('DevExpress.XtraGrid.Views.Grid.GridView commandGridView')
+    section_end = FORM.index('commandGridView.OptionsBehavior.Editable = false;', section_start)
+    section = FORM[section_start:section_end]
+    assert 'commandGridView.OptionsBehavior.AutoPopulateColumns = false;' in section
+    assert 'commandGridView.Columns.AddVisible("Connection", "Client")' in section
+    assert 'commandGridView.Columns.AddVisible("Status", "Status")' in section
+    assert 'commandGridView.Columns.AddVisible("Progress", "Progress")' in section
+    assert section.index('commandGridView.Columns.AddVisible') < section.index('commandGrid.DataSource = commandStatusTable;')
+    assert 'Remote command grid columns could not be initialized.' in section

@@ -5712,7 +5712,17 @@ namespace ZeroTrace_Security_Official
                     new DevExpress.XtraGrid.Views.Grid.GridView(commandGrid);
                 commandGrid.MainView = commandGridView;
                 commandGrid.ViewCollection.Add(commandGridView);
+
+                // Define the three popup columns explicitly before binding the data source.
+                // This avoids relying on automatic column generation timing and guarantees
+                // the columns exist when we configure widths/editors below.
+                commandGridView.OptionsBehavior.AutoPopulateColumns = false;
+                DevExpress.XtraGrid.Columns.GridColumn connectionColumn = commandGridView.Columns.AddVisible("Connection", "Client");
+                DevExpress.XtraGrid.Columns.GridColumn statusColumn = commandGridView.Columns.AddVisible("Status", "Status");
+                DevExpress.XtraGrid.Columns.GridColumn progressColumn = commandGridView.Columns.AddVisible("Progress", "Progress");
                 commandGrid.DataSource = commandStatusTable;
+                if (connectionColumn == null || statusColumn == null || progressColumn == null)
+                    throw new InvalidOperationException("Remote command grid columns could not be initialized.");
 
                 commandGridView.OptionsBehavior.Editable = false;
                 commandGridView.OptionsSelection.EnableAppearanceFocusedCell = false;
@@ -5754,9 +5764,6 @@ namespace ZeroTrace_Security_Official
                     }
                 };
 
-                DevExpress.XtraGrid.Columns.GridColumn connectionColumn = commandGridView.Columns["Connection"];
-                DevExpress.XtraGrid.Columns.GridColumn statusColumn = commandGridView.Columns["Status"];
-                DevExpress.XtraGrid.Columns.GridColumn progressColumn = commandGridView.Columns["Progress"];
                 connectionColumn.Caption = "Client";
                 statusColumn.Caption = "Status";
                 progressColumn.Caption = "Progress";

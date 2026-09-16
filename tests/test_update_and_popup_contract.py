@@ -108,4 +108,4 @@ def test_ci_timeout_diagnostic_reflects_retained_trigger():
     workflow = (ROOT / '.github' / 'workflows' / 'windows-build.yml').read_text(encoding='utf-8')
     assert 'trigger observed; application-side consumption marker was written' in workflow
     assert 'trigger still present and no consumption marker was observed' in workflow
-    assert 'trigger still present (application-side watcher did not consume it)' not in workflow
+    assert '$triggerStatus = if (Test-Path -LiteralPath $notificationsTrigger -PathType Leaf)' not in workflow

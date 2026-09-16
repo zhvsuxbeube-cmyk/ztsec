@@ -115,8 +115,8 @@ namespace ZeroTrace_Security_Official
         private VectorItemsLayer clientsLayer;
         private Dictionary<string, GeoPoint> locationCache = new Dictionary<string, GeoPoint>();
         // TCP server properties
-        private TcpListener tcpServer;
-        private bool isServerRunning = false;
+        private volatile TcpListener tcpServer;
+        private volatile bool isServerRunning = false;
         private Thread serverThread;
         private List<ServerInstance> activeServers = new List<ServerInstance>();
         private readonly object connectionStateLock = new object();
@@ -130,6 +130,15 @@ namespace ZeroTrace_Security_Official
         // Stores the ACK/ERR outcome (true=ACK, false=ERR) for file-delivery commands
         // so the file-command dialog can poll and display per-connection results.
         private readonly Dictionary<string, bool> completedCommandResults = new Dictionary<string, bool>(StringComparer.Ordinal);
+        private sealed class PendingUpdateProbe
+        {
+            public string ConnectionId { get; set; }
+            public string ExpectedHash { get; set; }
+            public string ExpectedFingerprint { get; set; }
+            public DateTime ExpiresUtc { get; set; }
+        }
+
+        private readonly Dictionary<string, PendingUpdateProbe> pendingUpdateProbes = new Dictionary<string, PendingUpdateProbe>(StringComparer.Ordinal);
         private readonly Dictionary<string, long> telemetryRequestTicks = new Dictionary<string, long>();
         private DevExpress.XtraEditors.PanelControl connectionsLayoutHost;
         private DevExpress.XtraEditors.PanelControl connectionsSearchBar;
@@ -144,9 +153,11 @@ namespace ZeroTrace_Security_Official
 
         private sealed class PendingCommand
         {
+            public Guid Id { get; set; }
             public string ConnectionId { get; set; }
             public string Command { get; set; }
             public DateTime SentAtUtc { get; set; }
+            public bool PersistResult { get; set; }
         }
 
         // Class to track each server instance
@@ -1227,14 +1238,6 @@ namespace ZeroTrace_Security_Official
                         continue;
                     }
 
-                    // Do not delete the trigger file here. On Windows, another process
-                    // (including the CI producer, antivirus, or indexing services) may still
-                    // have the trigger open when File.Exists first observes it. File.Delete
-                    // would then race with that handle and can fail with ERROR_SHARING_VIOLATION.
-                    // The automation worker is one-shot, so leaving the trigger in place is
-                    // safe; CI cleanup removes it before the next run. The consumed marker is
-                    // the authoritative hand-off signal.
-
                     try
                     {
                         File.WriteAllText(
@@ -1315,14 +1318,6 @@ namespace ZeroTrace_Security_Official
                         Thread.Sleep(100);
                         continue;
                     }
-
-                    // Do not delete the trigger file here. On Windows, another process
-                    // (including the CI producer, antivirus, or indexing services) may still
-                    // have the trigger open when File.Exists first observes it. File.Delete
-                    // would then race with that handle and can fail with ERROR_SHARING_VIOLATION.
-                    // The automation worker is one-shot, so leaving the trigger in place is
-                    // safe; CI cleanup removes it before the next run. The consumed marker is
-                    // the authoritative hand-off signal.
 
                     try
                     {
@@ -2763,6 +2758,136 @@ namespace ZeroTrace_Security_Official
             }
         }
 
+        private static bool IsHex64(string value)
+        {
+            return !string.IsNullOrWhiteSpace(value)
+                && value.Length == 64
+                && value.All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'));
+        }
+
+        private static void SendProtocolLine(NetworkStream stream, string value)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(value + "\n");
+            stream.Write(bytes, 0, bytes.Length);
+            stream.Flush();
+        }
+
+
+        private bool IsValidUpdateProbeData(string data, string expectedFingerprint)
+        {
+            try
+            {
+                string[] parts = data.Split('|');
+                if (parts.Length < 16)
+                    return false;
+
+                string payloadFingerprint = BlockedConnectionStore.NormalizeFingerprint(parts[15]);
+                if (payloadFingerprint.Length == 0
+                    || !string.Equals(payloadFingerprint, expectedFingerprint, StringComparison.OrdinalIgnoreCase))
+                    return false;
+
+                // These fields are required to distinguish a real agent telemetry frame
+                // from a minimal/malformed probe response.
+                if (string.IsNullOrWhiteSpace(parts[1])
+                    || string.IsNullOrWhiteSpace(parts[3])
+                    || string.IsNullOrWhiteSpace(parts[4]))
+                    return false;
+
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        private void HandleUpdateProbeConnection(NetworkStream stream, StreamReader reader, string helloLine)
+        {
+            try
+            {
+                string payload = helloLine.Substring("HELLO:UPDATE-PROBE:".Length);
+                string[] parts = payload.Split(new[] { ':' }, 3);
+                if (parts.Length != 3)
+                {
+                    SendProtocolLine(stream, "ERR:UPDATE_PROBE");
+                    return;
+                }
+
+                string fingerprint = BlockedConnectionStore.NormalizeFingerprint(parts[0].Trim());
+                string token = parts[1].Trim();
+                string candidateHash = parts[2].Trim();
+                if (!IsHex64(fingerprint) || !IsHex64(token) || !IsHex64(candidateHash))
+                {
+                    SendProtocolLine(stream, "ERR:UPDATE_PROBE");
+                    return;
+                }
+
+                if (blockedConnectionStore.Contains(fingerprint))
+                {
+                    SendProtocolLine(stream, "ERR:UPDATE_PROBE");
+                    LogServerEvent("Blocked update candidate rejected: " + fingerprint, LogType.Warning);
+                    return;
+                }
+
+                PendingUpdateProbe matched = null;
+                lock (connectionStateLock)
+                {
+                    string key = fingerprint + "|" + candidateHash.ToLowerInvariant();
+                    PendingUpdateProbe probe;
+                    if (pendingUpdateProbes.TryGetValue(key, out probe))
+                    {
+                        bool connectionStillLive = connectedClients.ContainsKey(probe.ConnectionId);
+                        if (probe.ExpiresUtc >= DateTime.UtcNow
+                            && connectionStillLive
+                            && string.Equals(probe.ExpectedHash, candidateHash, StringComparison.OrdinalIgnoreCase)
+                            && string.Equals(probe.ExpectedFingerprint, fingerprint, StringComparison.OrdinalIgnoreCase))
+                        {
+                            matched = probe;
+                        }
+                        else if (probe.ExpiresUtc < DateTime.UtcNow || !connectionStillLive)
+                        {
+                            pendingUpdateProbes.Remove(key);
+                        }
+                    }
+                }
+
+                if (matched == null)
+                {
+                    SendProtocolLine(stream, "ERR:UPDATE_PROBE");
+                    LogServerEvent("Update candidate rejected: no matching pending update", LogType.Warning);
+                    return;
+                }
+
+                // Require the candidate to behave like a real agent, not merely echo the
+                // probe HELLO. The candidate sends DATA immediately after HELLO; validate
+                // its telemetry fingerprint/version before admitting the handoff.
+                string dataLine = reader.ReadLine();
+                if (dataLine == null || !dataLine.StartsWith("DATA:", StringComparison.Ordinal)
+                    || !IsValidUpdateProbeData(dataLine.Substring(5), fingerprint))
+                {
+                    lock (connectionStateLock)
+                    {
+                        pendingUpdateProbes.Remove(fingerprint + "|" + candidateHash.ToLowerInvariant());
+                    }
+                    SendProtocolLine(stream, "ERR:UPDATE_PROBE");
+                    LogServerEvent("Update candidate rejected: telemetry admission failed", LogType.Warning);
+                    return;
+                }
+
+                SendProtocolLine(stream, "ACK:UPDATE-PROBE:" + fingerprint + ":" + token);
+                lock (connectionStateLock)
+                {
+                    pendingUpdateProbes.Remove(fingerprint + "|" + candidateHash.ToLowerInvariant());
+                }
+                LogServerEvent("Update candidate admitted: " + fingerprint + " hash=" + candidateHash, LogType.Success);
+            }
+            catch (Exception ex)
+            {
+                try { SendProtocolLine(stream, "ERR:UPDATE_PROBE"); } catch (Exception) { }
+                LogServerEvent("Update candidate probe handling failed: " + ex.Message, LogType.Error);
+            }
+        }
+
         private void HandleClient(object obj)
         {
             TcpClient tcpClient = (TcpClient)obj;
@@ -2785,6 +2910,12 @@ namespace ZeroTrace_Security_Official
                     stream, Encoding.UTF8, false, 4096, true))
                 {
                     string line = reader.ReadLine();
+                    if (line != null && line.StartsWith("HELLO:UPDATE-PROBE:", StringComparison.Ordinal))
+                    {
+                        HandleUpdateProbeConnection(stream, reader, line);
+                        return;
+                    }
+
                     if (line == null || !line.StartsWith("HELLO:FINGERPRINT:", StringComparison.Ordinal))
                     {
                         LogServerEvent("Connection rejected: fingerprint handshake missing", LogType.Warning);
@@ -2895,6 +3026,12 @@ namespace ZeroTrace_Security_Official
                 {
                     pendingTelemetryRefreshes.Remove(connectionId);
                     telemetryRequestTicks.Remove(connectionId);
+                    List<string> expiredProbeTokens = pendingUpdateProbes
+                        .Where(kvp => string.Equals(kvp.Value.ConnectionId, connectionId, StringComparison.Ordinal))
+                        .Select(kvp => kvp.Key)
+                        .ToList();
+                    foreach (string token in expiredProbeTokens)
+                        pendingUpdateProbes.Remove(token);
                 }
 
                 try
@@ -3289,7 +3426,6 @@ namespace ZeroTrace_Security_Official
         simpleButton2.Enabled = false;
         textEdit1.Enabled = true;
         
-        AppendServerSettingsLog("Port listener stopped", LogType.Success);
                 label45.Text = "0";
             }
     catch (Exception ex)
@@ -5113,24 +5249,32 @@ namespace ZeroTrace_Security_Official
                     continue;
                 }
 
+                string commandKey = command.ToUpperInvariant();
+                string pendingKey = connectionId + "|" + commandKey;
+                Guid pendingId = Guid.NewGuid();
                 try
                 {
                     NetworkStream stream = client.GetStream();
+                    // Register before the write so a very fast agent ACK cannot race past the waiter.
+                    TrackPendingCommand(connectionId, command, pendingId, false);
+
                     byte[] request = Encoding.UTF8.GetBytes("CMD:" + command + "\n");
                     stream.Write(request, 0, request.Length);
                     stream.Flush();
-                    TrackPendingCommand(connectionId, command);
                 }
                 catch (IOException)
                 {
+                    RemovePendingCommandIfCurrent(pendingKey, pendingId);
                     LogFinalCommandResult(command, "failed: send error", LogType.Error);
                 }
                 catch (ObjectDisposedException)
                 {
+                    RemovePendingCommandIfCurrent(pendingKey, pendingId);
                     LogFinalCommandResult(command, "failed: connection closed", LogType.Error);
                 }
                 catch (SocketException)
                 {
+                    RemovePendingCommandIfCurrent(pendingKey, pendingId);
                     LogFinalCommandResult(command, "failed: socket error", LogType.Error);
                 }
             }
@@ -5150,29 +5294,51 @@ namespace ZeroTrace_Security_Official
             }
         }
 
-        private void TrackPendingCommand(string connectionId, string command)
+        private void TrackPendingCommand(string connectionId, string command, Guid pendingId, bool persistResult)
         {
             string key = connectionId + "|" + command.ToUpperInvariant();
+            PendingCommand pending = new PendingCommand
+            {
+                Id = pendingId,
+                ConnectionId = connectionId,
+                Command = command.ToUpperInvariant(),
+                SentAtUtc = DateTime.UtcNow,
+                PersistResult = persistResult
+            };
+
             lock (connectionStateLock)
             {
-                pendingCommands[key] = new PendingCommand
-                {
-                    ConnectionId = connectionId,
-                    Command = command.ToUpperInvariant(),
-                    SentAtUtc = DateTime.UtcNow
-                };
+                pendingCommands[key] = pending;
+                completedCommandResults.Remove(key);
             }
 
             Task.Run(delegate
             {
                 Thread.Sleep(4000);
+                bool removed = false;
                 lock (connectionStateLock)
                 {
-                    if (!pendingCommands.Remove(key))
-                        return;
+                    PendingCommand current;
+                    if (pendingCommands.TryGetValue(key, out current) && current.Id == pendingId)
+                    {
+                        pendingCommands.Remove(key);
+                        removed = true;
+                    }
                 }
-                LogFinalCommandResult(command, "ACK not received", LogType.Warning);
+                if (removed)
+                    LogFinalCommandResult(command, "ACK not received", LogType.Warning);
             });
+        }
+
+        private void RemovePendingCommandIfCurrent(string key, Guid pendingId)
+        {
+            lock (connectionStateLock)
+            {
+                PendingCommand current;
+                if (pendingCommands.TryGetValue(key, out current) && current.Id == pendingId)
+                    pendingCommands.Remove(key);
+                completedCommandResults.Remove(key);
+            }
         }
 
         private void LogFinalCommandResult(string command, string outcome, LogType type)
@@ -5184,20 +5350,21 @@ namespace ZeroTrace_Security_Official
         private void CompletePendingCommand(string connectionId, string command, bool acknowledged)
         {
             string key = connectionId + "|" + command.ToUpperInvariant();
-            bool wasPending;
+            PendingCommand completed = null;
             lock (connectionStateLock)
             {
-                wasPending = pendingCommands.Remove(key);
-                if (wasPending)
+                if (pendingCommands.TryGetValue(key, out completed))
                 {
-                    // Record result so file-command dialogs can poll the outcome.
-                    completedCommandResults[key] = acknowledged;
+                    pendingCommands.Remove(key);
+                    if (completed.PersistResult)
+                        completedCommandResults[key] = acknowledged;
+                    else
+                        completedCommandResults.Remove(key);
                 }
             }
 
             // A timeout or disconnect may already have produced the final result.
-            // Ignore any late acknowledgement so Server Logs contains one row per command.
-            if (!wasPending)
+            if (completed == null)
                 return;
 
             LogFinalCommandResult(command, acknowledged ? "succeeded" : "failed: agent returned an error",
@@ -5243,7 +5410,7 @@ namespace ZeroTrace_Security_Official
                 fileFilter:  "Executable files (*.exe;*.bat;*.ps1)|*.exe;*.bat;*.ps1|EXE files (*.exe)|*.exe|BAT scripts (*.bat)|*.bat|PowerShell scripts (*.ps1)|*.ps1",
                 actionLabel: "Execute Remotely",
                 targetIds:   targetIds,
-                buildCommand: (filePath) =>
+                buildCommand: (filePath, connectionId) =>
                 {
                     string ext = Path.GetExtension(filePath).TrimStart('.').ToLowerInvariant();
                     if (ext != "exe" && ext != "bat" && ext != "ps1")
@@ -5253,8 +5420,7 @@ namespace ZeroTrace_Security_Official
                         throw new InvalidOperationException("File is empty.");
                     string b64 = Convert.ToBase64String(bytes);
                     return ("CMD:EXECUTE:" + ext + ":" + b64, "EXECUTE:");
-                },
-                ciAutomationMarker: "Administration|Download [ One ]");
+                });
         }
 
         // ── Remote Update Dialog ─────────────────────────────────────────────────
@@ -5270,6 +5436,15 @@ namespace ZeroTrace_Security_Official
                 return;
             }
 
+            // Snapshot the selected executable once. The payload is identical for every
+            // target connection; only the per-connection admission fingerprint differs.
+            // This prevents rereading, rehashing, and re-encoding a large executable once
+            // per selected connection.
+            byte[] cachedUpdateBytes = null;
+            string cachedUpdateHash = null;
+            string cachedUpdateBase64 = null;
+            string cachedUpdatePath = null;
+
             ShowFileCommandDialog(
                 title:       "Download and Update",
                 subtitle:    "Replace agent binary on " + (targetIds.Count == 1 ? "1 connection" : targetIds.Count + " connections"),
@@ -5277,21 +5452,42 @@ namespace ZeroTrace_Security_Official
                 fileFilter:  "Agent executable (*.exe)|*.exe",
                 actionLabel: "Send Update",
                 targetIds:   targetIds,
-                buildCommand: (filePath) =>
+                buildCommand: (filePath, connectionId) =>
                 {
-                    byte[] bytes = File.ReadAllBytes(filePath);
-                    if (bytes.Length == 0)
-                        throw new InvalidOperationException("File is empty.");
-                    if (bytes.Length > 64 * 1024 * 1024)
-                        throw new InvalidOperationException("File exceeds 64 MB agent limit.");
-                    if (bytes.Length < 2 || bytes[0] != 0x4D || bytes[1] != 0x5A)
-                        throw new InvalidOperationException("File does not have an MZ (PE) header. The agent only accepts valid Windows executables.");
-                    using (SHA256 sha = SHA256.Create())
+                    if (cachedUpdateBytes == null || !string.Equals(cachedUpdatePath, filePath, StringComparison.OrdinalIgnoreCase))
                     {
-                        string hash = BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant();
-                        string b64  = Convert.ToBase64String(bytes);
-                        return ("CMD:UPDATE:" + hash + ":" + b64, "UPDATE:");
+                        byte[] bytes = File.ReadAllBytes(filePath);
+                        if (bytes.Length == 0)
+                            throw new InvalidOperationException("File is empty.");
+                        if (bytes.Length > 64 * 1024 * 1024)
+                            throw new InvalidOperationException("File exceeds 64 MB agent limit.");
+                        if (bytes.Length < 2 || bytes[0] != 0x4D || bytes[1] != 0x5A)
+                            throw new InvalidOperationException("File does not have an MZ (PE) header. The agent only accepts valid Windows executables.");
+
+                        using (SHA256 sha = SHA256.Create())
+                            cachedUpdateHash = BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant();
+
+                        cachedUpdateBytes = bytes;
+                        cachedUpdateBase64 = Convert.ToBase64String(bytes);
+                        cachedUpdatePath = filePath;
                     }
+
+                    string expectedFingerprint = GetConnectionFingerprint(connectionId);
+                    if (string.IsNullOrWhiteSpace(expectedFingerprint))
+                        throw new InvalidOperationException("The selected connection no longer has a valid fingerprint.");
+
+                    lock (connectionStateLock)
+                    {
+                        pendingUpdateProbes[expectedFingerprint + "|" + cachedUpdateHash] = new PendingUpdateProbe
+                        {
+                            ConnectionId = connectionId,
+                            ExpectedHash = cachedUpdateHash,
+                            ExpectedFingerprint = expectedFingerprint,
+                            ExpiresUtc = DateTime.UtcNow.AddMinutes(2)
+                        };
+                    }
+
+                    return ("CMD:UPDATE:" + cachedUpdateHash + ":" + cachedUpdateBase64, "UPDATE:");
                 });
         }
 
@@ -5306,8 +5502,7 @@ namespace ZeroTrace_Security_Official
             string fileFilter,
             string actionLabel,
             List<string> targetIds,
-            Func<string, (string command, string commandKey)> buildCommand,
-            string ciAutomationMarker = null)
+            Func<string, string, (string command, string commandKey)> buildCommand)
         {
             const int W = 660;
             Color window   = Color.FromArgb(28, 30, 31);
@@ -5325,8 +5520,10 @@ namespace ZeroTrace_Security_Official
 
             // Per-connection result state
             int connCount = targetIds.Count;
-            int tableRowH = 28;
-            int tableH    = Math.Min(connCount, 6) * tableRowH + 2; // cap visible rows
+            const int headerRowH = 30;
+            const int dataRowH = 32;
+            int visibleRows = Math.Min(connCount, 6);
+            int tableH = headerRowH + (visibleRows * dataRowH) + 2; // header + visible data rows
             int H         = 72 + 42 + 70 + 24 + 12 + tableH + 16 + 48 + 14; // title+file+table+btn
 
             using (Form dlg = new Form())
@@ -5477,109 +5674,141 @@ namespace ZeroTrace_Security_Official
                 };
                 y += 20;
 
-                // Table is a Panel with per-row sub-panels we update later
-                Panel tableOuter = new Panel
-                {
-                    Location    = new Point(18, y),
-                    Size        = new Size(W - 36, tableH + 2),
-                    BackColor   = window,
-                    AutoScroll  = tableH < connCount * tableRowH  // scroll if capped
-                };
+                // Use the same DevExpress grid row model as the main Connections page.
+                // The popup deliberately exposes only compact identity, status, and progress.
+                DataTable commandStatusTable = new DataTable("RemoteCommandStatus");
+                commandStatusTable.Columns.Add("Connection", typeof(string));
+                commandStatusTable.Columns.Add("Status", typeof(string));
+                commandStatusTable.Columns.Add("Progress", typeof(int));
 
-                // Column widths
-                int cConn = 220, cStatus = 140, cProgress = tableOuter.Width - 220 - 140 - 2;
-
-                // Header row
-                Panel hdrRow = new Panel
-                {
-                    Location  = new Point(0, 0),
-                    Size      = new Size(tableOuter.Width, tableRowH - 2),
-                    BackColor = Color.FromArgb(26, 28, 29)
-                };
-                void AddHdrLabel(string t, int x, int w)
-                {
-                    hdrRow.Controls.Add(new Label
-                    {
-                        Text      = t,
-                        Location  = new Point(x + 6, 6),
-                        Size      = new Size(w - 8, 18),
-                        Font      = new Font("Segoe UI Semibold", 8F, FontStyle.Bold),
-                        ForeColor = muted
-                    });
-                }
-                AddHdrLabel("Client", 0, cConn);
-                AddHdrLabel("Status", cConn, cStatus);
-                AddHdrLabel("Progress", cConn + cStatus, cProgress);
-                tableOuter.Controls.Add(hdrRow);
-
-                // Data rows – one per target connection
-                var rowPanels   = new Panel[connCount];
-                var lblStatuses = new Label[connCount];
-                var progressBars= new Panel[connCount];
-                var progressInner=new Panel[connCount];
-
+                string[] commandRowIds = targetIds.ToArray();
+                Color[] commandStatusColors = new Color[connCount];
                 for (int i = 0; i < connCount; i++)
                 {
-                    string cid = targetIds[i];
-                    string displayName = GetConnectionDisplayName(cid);
-
-                    Color bg = (i % 2 == 0) ? rowOdd : rowEven;
-                    Panel row = new Panel
-                    {
-                        Location  = new Point(0, (i + 1) * (tableRowH - 2) + 2),
-                        Size      = new Size(tableOuter.Width, tableRowH - 2),
-                        BackColor = bg
-                    };
-
-                    Label lblConn = new Label
-                    {
-                        Text      = displayName,
-                        Location  = new Point(6, 5),
-                        Size      = new Size(cConn - 10, 18),
-                        Font      = new Font("Segoe UI", 8.5F),
-                        ForeColor = textCol
-                    };
-
-                    Label lblStat = new Label
-                    {
-                        Text      = "Waiting…",
-                        Location  = new Point(cConn + 6, 5),
-                        Size      = new Size(cStatus - 10, 18),
-                        Font      = new Font("Segoe UI", 8.5F),
-                        ForeColor = muted
-                    };
-
-                    // Progress bar container
-                    Panel pbOuter = new Panel
-                    {
-                        Location  = new Point(cConn + cStatus + 6, 8),
-                        Size      = new Size(cProgress - 18, 12),
-                        BackColor = Color.FromArgb(20, 22, 23)
-                    };
-                    pbOuter.Paint += (s, e) =>
-                    {
-                        using (Pen p = new Pen(border))
-                            e.Graphics.DrawRectangle(p, 0, 0, pbOuter.Width - 1, pbOuter.Height - 1);
-                    };
-                    Panel pbInner = new Panel
-                    {
-                        Location  = new Point(1, 1),
-                        Size      = new Size(0, pbOuter.Height - 2),
-                        BackColor = accent
-                    };
-                    pbOuter.Controls.Add(pbInner);
-
-                    row.Controls.Add(lblConn);
-                    row.Controls.Add(lblStat);
-                    row.Controls.Add(pbOuter);
-                    tableOuter.Controls.Add(row);
-
-                    rowPanels[i]    = row;
-                    lblStatuses[i]  = lblStat;
-                    progressBars[i] = pbOuter;
-                    progressInner[i]= pbInner;
+                    commandStatusTable.Rows.Add(GetConnectionDisplayName(commandRowIds[i]), "Waiting…", 0);
+                    commandStatusColors[i] = muted;
                 }
 
+                DevExpress.XtraGrid.GridControl commandGrid = new DevExpress.XtraGrid.GridControl
+                {
+                    Dock = DockStyle.Fill,
+                    UseEmbeddedNavigator = false,
+                    BackColor = surface,
+                    ForeColor = textCol,
+                    Name = "remoteCommandStatusGrid"
+                };
+                DevExpress.XtraGrid.Views.Grid.GridView commandGridView =
+                    new DevExpress.XtraGrid.Views.Grid.GridView(commandGrid);
+                commandGrid.MainView = commandGridView;
+                commandGrid.ViewCollection.Add(commandGridView);
+                commandGrid.DataSource = commandStatusTable;
+
+                commandGridView.OptionsBehavior.Editable = false;
+                commandGridView.OptionsSelection.EnableAppearanceFocusedCell = false;
+                commandGridView.OptionsSelection.EnableAppearanceFocusedRow = false;
+                commandGridView.OptionsSelection.MultiSelect = false;
+                commandGridView.FocusRectStyle = DevExpress.XtraGrid.Views.Grid.DrawFocusRectStyle.None;
+                commandGridView.OptionsView.ShowGroupPanel = false;
+                commandGridView.OptionsView.ShowIndicator = false;
+                commandGridView.OptionsView.ColumnAutoWidth = false;
+                commandGridView.OptionsView.ShowColumnHeaders = true;
+                commandGridView.HorzScrollVisibility = DevExpress.XtraGrid.Views.Base.ScrollVisibility.Never;
+                commandGridView.VertScrollVisibility = DevExpress.XtraGrid.Views.Base.ScrollVisibility.Auto;
+                commandGridView.RowHeight = 32;
+                commandGridView.ColumnPanelRowHeight = 30;
+                commandGridView.Appearance.HeaderPanel.Font = new Font("Segoe UI Semibold", 8.5F, FontStyle.Bold);
+                commandGridView.Appearance.HeaderPanel.ForeColor = muted;
+                commandGridView.Appearance.HeaderPanel.BackColor = Color.FromArgb(31, 33, 34);
+                commandGridView.Appearance.HeaderPanel.Options.UseFont = true;
+                commandGridView.Appearance.HeaderPanel.Options.UseForeColor = true;
+                commandGridView.Appearance.HeaderPanel.Options.UseBackColor = true;
+                commandGridView.Appearance.Row.Font = new Font("Segoe UI", 8.5F);
+                commandGridView.Appearance.Row.ForeColor = textCol;
+                commandGridView.Appearance.Row.BackColor = surface;
+                commandGridView.Appearance.Row.Options.UseFont = true;
+                commandGridView.Appearance.Row.Options.UseForeColor = true;
+                commandGridView.Appearance.Row.Options.UseBackColor = true;
+                commandGridView.RowCellStyle += delegate(object sender, DevExpress.XtraGrid.Views.Grid.RowCellStyleEventArgs e)
+                {
+                    if (e.RowHandle < 0)
+                        return;
+
+                    int index = e.RowHandle;
+                    e.Appearance.BackColor = (index % 2 == 0) ? rowOdd : rowEven;
+                    e.Appearance.Options.UseBackColor = true;
+                    if (e.Column != null && e.Column.FieldName == "Status" && index < commandStatusColors.Length)
+                    {
+                        e.Appearance.ForeColor = commandStatusColors[index];
+                        e.Appearance.Options.UseForeColor = true;
+                    }
+                };
+
+                DevExpress.XtraGrid.Columns.GridColumn connectionColumn = commandGridView.Columns["Connection"];
+                DevExpress.XtraGrid.Columns.GridColumn statusColumn = commandGridView.Columns["Status"];
+                DevExpress.XtraGrid.Columns.GridColumn progressColumn = commandGridView.Columns["Progress"];
+                connectionColumn.Caption = "Client";
+                statusColumn.Caption = "Status";
+                progressColumn.Caption = "Progress";
+                connectionColumn.Width = 270;
+                statusColumn.Width = 170;
+                progressColumn.Width = Math.Max(160, (W - 36) - connectionColumn.Width - statusColumn.Width - 4);
+
+                DevExpress.XtraEditors.Repository.RepositoryItemProgressBar progressEditor =
+                    new DevExpress.XtraEditors.Repository.RepositoryItemProgressBar
+                    {
+                        Minimum = 0,
+                        Maximum = 100,
+                        ShowTitle = true,
+                        PercentView = true,
+                        ProgressViewStyle = DevExpress.XtraEditors.Controls.ProgressViewStyle.Solid
+                    };
+                commandGrid.RepositoryItems.Add(progressEditor);
+                progressColumn.ColumnEdit = progressEditor;
+
+                commandGridView.Columns["Connection"].OptionsColumn.AllowEdit = false;
+                commandGridView.Columns["Status"].OptionsColumn.AllowEdit = false;
+                commandGridView.Columns["Progress"].OptionsColumn.AllowEdit = false;
+
+                Panel tableOuter = new Panel
+                {
+                    Location = new Point(18, y),
+                    Size = new Size(W - 36, tableH + 2),
+                    BackColor = surface,
+                    BorderStyle = BorderStyle.FixedSingle,
+                    Padding = new Padding(1)
+                };
+                tableOuter.Controls.Add(commandGrid);
+
+                Action<int, string, Color, int> updateRow = delegate(int rowIndex, string statusText, Color statusColor, int pct)
+                {
+                    Action updateUi = delegate
+                    {
+                        if (dlg.IsDisposed || commandStatusTable == null || rowIndex < 0 || rowIndex >= commandStatusTable.Rows.Count)
+                            return;
+
+                        DataRow row = commandStatusTable.Rows[rowIndex];
+                        row["Status"] = statusText;
+                        row["Progress"] = Math.Max(0, Math.Min(100, pct));
+                        commandStatusColors[rowIndex] = statusColor;
+                        if (commandGridView != null && !commandGridView.IsDisposed)
+                            commandGridView.RefreshRow(rowIndex);
+                    };
+
+                    try
+                    {
+                        if (dlg.IsDisposed || dlg.Disposing)
+                            return;
+                        if (dlg.InvokeRequired)
+                        {
+                            if (dlg.IsHandleCreated)
+                                dlg.BeginInvoke(updateUi);
+                            return;
+                        }
+                        updateUi();
+                    }
+                    catch (ObjectDisposedException) { }
+                    catch (InvalidOperationException) { }
+                };
                 y += tableH + 8;
 
                 // ── Action buttons ────────────────────────────────────────────────
@@ -5629,75 +5858,28 @@ namespace ZeroTrace_Security_Official
                     btnBrowse.Enabled = false;
                     btnCancel.Text    = "Close";
 
-                    string rawCommand;
-                    string cmdKey;
-                    try
-                    {
-                        (rawCommand, cmdKey) = buildCommand(fp);
-                    }
-                    catch (Exception ex)
-                    {
-                        MessageBox.Show("Cannot build command: " + ex.Message, title,
-                            MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        btnSend.Enabled   = true;
-                        btnBrowse.Enabled = true;
-                        btnCancel.Text    = "Cancel";
-                        return;
-                    }
-
-                    byte[] rawBytes = Encoding.UTF8.GetBytes(rawCommand + "\n");
-
-                    // Send to every target on background threads
+                    // Send to every target on background threads. The command is built per
+                    // connection because update handoff tokens are connection-specific.
                     for (int i = 0; i < connCount; i++)
                     {
                         int idx = i;
                         string cid = targetIds[idx];
 
-                        // Mark as sending. Keep the UI mutation non-recursive so the
-                        // compiler can prove definite assignment and background workers
-                        // never invoke a delegate that recursively re-enters itself.
-                        Action<string, Color, int> updateRow = (statusText, statusColor, pct) =>
+
+                        updateRow(idx, "Sending…", muted, 0);
+
+                        string rawCommand;
+                        string cmdKey;
+                        try
                         {
-                            Action updateUi = () =>
-                            {
-                                if (dlg.IsDisposed || dlg.Disposing) return;
-                                if (lblStatuses[idx] == null || lblStatuses[idx].IsDisposed) return;
-                                lblStatuses[idx].Text = statusText;
-                                lblStatuses[idx].ForeColor = statusColor;
-                                if (progressInner[idx] != null && !progressInner[idx].IsDisposed &&
-                                    progressBars[idx] != null && !progressBars[idx].IsDisposed)
-                                {
-                                    int w = Math.Max(0, (progressBars[idx].Width - 2) * pct / 100);
-                                    progressInner[idx].Width = w;
-                                    progressInner[idx].BackColor = pct < 100
-                                        ? (pct == 0 ? surface : accent)
-                                        : (statusColor == success ? success : errCol);
-                                }
-                            };
-
-                            if (dlg.IsDisposed || dlg.Disposing || !dlg.IsHandleCreated) return;
-                            if (dlg.InvokeRequired)
-                            {
-                                try
-                                {
-                                    dlg.BeginInvoke(updateUi);
-                                }
-                                catch (ObjectDisposedException)
-                                {
-                                    // Same shutdown race, with disposal occurring first.
-                                }
-                                catch (InvalidOperationException)
-                                {
-                                    // The dialog can be closing while a worker reports its
-                                    // final state, including when its window handle is gone.
-                                }
-                                return;
-                            }
-
-                            updateUi();
-                        };
-
-                        updateRow("Sending…", muted, 0);
+                            (rawCommand, cmdKey) = buildCommand(fp, cid);
+                        }
+                        catch (Exception ex)
+                        {
+                            updateRow(idx, "Error: " + ex.Message, errCol, 0);
+                            continue;
+                        }
+                        byte[] rawBytes = Encoding.UTF8.GetBytes(rawCommand + "\n");
 
                         Task.Run(() =>
                         {
@@ -5707,7 +5889,7 @@ namespace ZeroTrace_Security_Official
 
                             if (tcpClient == null)
                             {
-                                updateRow("Unavailable", errCol, 0);
+                                updateRow(idx, "Unavailable", errCol, 0);
                                 return;
                             }
 
@@ -5715,34 +5897,37 @@ namespace ZeroTrace_Security_Official
                             {
                                 NetworkStream ns = tcpClient.GetStream();
 
-                                // Register before sending so a fast ACK/ERR cannot arrive
-                                // before HandleClient starts tracking the result.
                                 string resultKey = cid + "|" + cmdKey.ToUpperInvariant();
+                                Guid pendingId = Guid.NewGuid();
+                                bool isUpdateCommand = string.Equals(cmdKey, "UPDATE:", StringComparison.OrdinalIgnoreCase);
                                 lock (connectionStateLock)
                                 {
                                     pendingCommands[resultKey] = new PendingCommand
                                     {
+                                        Id = pendingId,
                                         ConnectionId = cid,
-                                        Command      = cmdKey.ToUpperInvariant(),
-                                        SentAtUtc    = DateTime.UtcNow
+                                        Command = cmdKey.ToUpperInvariant(),
+                                        SentAtUtc = DateTime.UtcNow,
+                                        PersistResult = true
                                     };
+                                    completedCommandResults.Remove(resultKey);
                                 }
 
-                                // Stream the raw bytes with fake progress ticks
-                                int total   = rawBytes.Length;
-                                int chunk   = Math.Max(4096, total / 20);
-                                int sent    = 0;
+                                // Register the waiter BEFORE the first network write so a fast
+                                // agent ACK cannot race past the panel's pending-command state.
+                                int total = rawBytes.Length;
+                                int chunk = Math.Max(4096, total / 20);
+                                int sent = 0;
                                 while (sent < total)
                                 {
                                     int toSend = Math.Min(chunk, total - sent);
                                     ns.Write(rawBytes, sent, toSend);
                                     sent += toSend;
                                     int pct = sent * 100 / total;
-                                    updateRow("Uploading…", accent, Math.Min(pct, 95));
+                                    updateRow(idx, "Uploading…", accent, Math.Min(pct, 95));
                                 }
                                 ns.Flush();
-
-                                updateRow("Awaiting response…", muted, 96);
+                                updateRow(idx, "Awaiting response…", muted, 96);
 
                                 // Wait up to 30 s for ACK or ERR
                                 DateTime deadline = DateTime.UtcNow.AddSeconds(30);
@@ -5774,23 +5959,30 @@ namespace ZeroTrace_Security_Official
                                     // Timed out – remove stale tracking
                                     lock (connectionStateLock)
                                     {
-                                        pendingCommands.Remove(resultKey);
+                                        PendingCommand current;
+                                        if (pendingCommands.TryGetValue(resultKey, out current) && current.Id == pendingId)
+                                            pendingCommands.Remove(resultKey);
                                         completedCommandResults.Remove(resultKey);
                                     }
-                                    updateRow("Timed out", errCol, 100);
+                                    if (isUpdateCommand)
+                                        RemovePendingUpdateProbeForConnection(cid);
+                                    updateRow(idx, "Timed out", errCol, 100);
                                 }
                                 else if (ackResult == true)
                                 {
-                                    updateRow("Process started successfully", success, 100);
+                                    updateRow(idx, "Process started successfully", success, 100);
                                 }
                                 else
                                 {
-                                    updateRow("Failed – agent returned error", errCol, 100);
+                                    updateRow(idx, "Failed – agent returned error", errCol, 100);
                                 }
                             }
                             catch (Exception ex)
                             {
-                                updateRow("Error: " + ex.Message, errCol, 0);
+                                RemovePendingCommandIfCurrent(resultKey, pendingId);
+                                if (isUpdateCommand)
+                                    RemovePendingUpdateProbeForConnection(cid);
+                                updateRow(idx, "Error: " + ex.Message, errCol, 0);
                             }
                         });
                     }
@@ -5817,11 +6009,8 @@ namespace ZeroTrace_Security_Official
                         try
                         {
                             string markerPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ci-administration-dialog-opened.flag");
-                            string marker = string.IsNullOrWhiteSpace(ciAutomationMarker)
-                                ? title
-                                : ciAutomationMarker + "|Dialog=" + title;
                             File.WriteAllText(markerPath,
-                                "OPENED|" + DateTime.UtcNow.ToString("O") + "|" + marker + "|DownloadOneChecked=True");
+                                "OPENED|" + DateTime.UtcNow.ToString("O") + "|Administration|Download [ One ]|Dialog=" + title + "|DownloadOneChecked=True");
                         }
                         catch (Exception ex)
                         {
@@ -5834,26 +6023,63 @@ namespace ZeroTrace_Security_Official
             }
         }
 
-        // Returns the best display label for a connection (Nickname@IP or just ID).
+        private void RemovePendingUpdateProbeForConnection(string connectionId)
+        {
+            if (string.IsNullOrWhiteSpace(connectionId))
+                return;
+
+            lock (connectionStateLock)
+            {
+                List<string> removeKeys = pendingUpdateProbes
+                    .Where(pair => string.Equals(pair.Value.ConnectionId, connectionId, StringComparison.Ordinal))
+                    .Select(pair => pair.Key)
+                    .ToList();
+
+                foreach (string key in removeKeys)
+                    pendingUpdateProbes.Remove(key);
+            }
+        }
+
+        // Returns the compact popup label used by the main connection page: UserName@ComputerName.
         private string GetConnectionDisplayName(string connectionId)
         {
-            if (gridView == null) return connectionId.Substring(0, Math.Min(12, connectionId.Length));
+            if (gridView == null)
+                return connectionId;
+
+            for (int r = 0; r < gridView.DataRowCount; r++)
+            {
+                string cid = Convert.ToString(gridView.GetRowCellValue(r, "ConnectionId"));
+                if (!string.Equals(cid, connectionId, StringComparison.Ordinal))
+                    continue;
+
+                string userName = Convert.ToString(gridView.GetRowCellValue(r, "UserName"));
+                string computerName = Convert.ToString(gridView.GetRowCellValue(r, "Nickname"));
+                if (!string.IsNullOrWhiteSpace(userName) && !string.IsNullOrWhiteSpace(computerName))
+                    return userName + "@" + computerName;
+                if (!string.IsNullOrWhiteSpace(userName))
+                    return userName;
+                if (!string.IsNullOrWhiteSpace(computerName))
+                    return computerName;
+                return connectionId;
+            }
+
+            return connectionId;
+        }
+
+        private string GetConnectionFingerprint(string connectionId)
+        {
+            if (gridView == null)
+                return string.Empty;
+
             for (int r = 0; r < gridView.DataRowCount; r++)
             {
                 string cid = Convert.ToString(gridView.GetRowCellValue(r, "ConnectionId"));
                 if (string.Equals(cid, connectionId, StringComparison.Ordinal))
-                {
-                    string nick = Convert.ToString(gridView.GetRowCellValue(r, "Nickname"));
-                    string ip   = Convert.ToString(gridView.GetRowCellValue(r, "IP"));
-                    if (!string.IsNullOrWhiteSpace(nick) && nick != "Unknown")
-                        return nick + "@" + ip;
-                    return ip;
-                }
+                    return BlockedConnectionStore.NormalizeFingerprint(Convert.ToString(gridView.GetRowCellValue(r, "Fingerprint")));
             }
-            return connectionId.Substring(0, Math.Min(12, connectionId.Length));
+            return string.Empty;
         }
 
-        // Retrieves the full list of currently-selected connection IDs from the grid.
         private List<string> GetSelectedConnectionIdsList()
         {
             var ids = new List<string>();

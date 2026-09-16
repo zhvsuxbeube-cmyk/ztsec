@@ -117,6 +117,7 @@ namespace ZeroTrace_Security_Official
         // TCP server properties
         private volatile TcpListener tcpServer;
         private volatile bool isServerRunning = false;
+        private volatile bool serverStopRequested = false;
         private Thread serverThread;
         private List<ServerInstance> activeServers = new List<ServerInstance>();
         private readonly object connectionStateLock = new object();
@@ -2643,6 +2644,7 @@ namespace ZeroTrace_Security_Official
                 listener.Start();
 
                 tcpServer = listener;
+                serverStopRequested = false;
                 isServerRunning = true;
 
                 AppendServerSettingsLog("Server listening on port " + port, LogType.Success);
@@ -2675,6 +2677,7 @@ namespace ZeroTrace_Security_Official
         {
             try
             {
+                serverStopRequested = true;
                 isServerRunning = false;
 
                 if (tcpServer != null)
@@ -2692,8 +2695,11 @@ namespace ZeroTrace_Security_Official
                     try { client.Close(); } catch (Exception) { }
                 }
 
-                if (serverThread != null && serverThread.IsAlive)
-                    serverThread.Join(1500);
+                Thread listenerThread = serverThread;
+                if (listenerThread != null && listenerThread.IsAlive && listenerThread != Thread.CurrentThread)
+                    listenerThread.Join(1500);
+
+                AppendServerSettingsLog("Port listener stopped", LogType.Success);
             }
             catch (Exception ex)
             {
@@ -2754,7 +2760,8 @@ namespace ZeroTrace_Security_Official
                 {
                 }
 
-                AppendServerSettingsLog("Port listener stopped", LogType.Success);
+                if (!serverStopRequested)
+                    AppendServerSettingsLog("Port listener stopped unexpectedly", LogType.Warning);
             }
         }
 
@@ -5765,6 +5772,12 @@ namespace ZeroTrace_Security_Official
                 commandGrid.RepositoryItems.Add(progressEditor);
                 progressColumn.ColumnEdit = progressEditor;
 
+                // Force initial data/layout creation before the dialog is shown. This prevents
+                // CI screenshots from catching the grid between construction and first paint.
+                commandGrid.ForceInitialize();
+                commandGridView.LayoutChanged();
+                commandGrid.RefreshDataSource();
+
                 commandGridView.Columns["Connection"].OptionsColumn.AllowEdit = false;
                 commandGridView.Columns["Status"].OptionsColumn.AllowEdit = false;
                 commandGridView.Columns["Progress"].OptionsColumn.AllowEdit = false;
@@ -6006,15 +6019,60 @@ namespace ZeroTrace_Security_Official
                 {
                     dlg.Shown += (s, e) =>
                     {
+                        // Shown occurs before the first paint. Queue one UI turn so the
+                        // modal window and DevExpress grid have completed layout/data binding
+                        // before CI considers the screenshot state ready.
                         try
                         {
-                            string markerPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ci-administration-dialog-opened.flag");
-                            File.WriteAllText(markerPath,
-                                "OPENED|" + DateTime.UtcNow.ToString("O") + "|Administration|Download [ One ]|Dialog=" + title + "|DownloadOneChecked=True");
+                            dlg.BeginInvoke(new Action(delegate
+                            {
+                                try
+                                {
+                                    if (!dlg.IsDisposed && !dlg.Disposing)
+                                    {
+                                        dlg.Activate();
+                                        dlg.BringToFront();
+                                    }
+                                    commandGridView.LayoutChanged();
+                                    commandGrid.RefreshDataSource();
+                                    commandGrid.Update();
+                                    dlg.PerformLayout();
+                                    dlg.Update();
+                                    dlg.Refresh();
+
+                                    string markerPath = Path.Combine(
+                                        AppDomain.CurrentDomain.BaseDirectory,
+                                        "ci-administration-dialog-opened.flag");
+                                    File.WriteAllText(
+                                        markerPath,
+                                        "OPENED|" + DateTime.UtcNow.ToString("O")
+                                        + "|Administration|Download [ One ]|Dialog=" + title
+                                        + "|DownloadOneChecked=True|Rendered=True");
+                                }
+                                catch (Exception ex)
+                                {
+                                    LogToMonitor(
+                                        "CI administration dialog verification failed: " + ex.Message,
+                                        LogType.Error);
+                                    try
+                                    {
+                                        string errorPath = Path.Combine(
+                                            AppDomain.CurrentDomain.BaseDirectory,
+                                            "ci-administration-automation-error.txt");
+                                        File.WriteAllText(
+                                            errorPath,
+                                            "DIALOG_RENDER_FAILED|"
+                                            + DateTime.UtcNow.ToString("O") + "|" + ex);
+                                    }
+                                    catch { }
+                                }
+                            }));
                         }
                         catch (Exception ex)
                         {
-                            LogToMonitor("CI administration dialog verification failed: " + ex.Message, LogType.Error);
+                            LogToMonitor(
+                                "CI administration dialog verification scheduling failed: " + ex.Message,
+                                LogType.Error);
                         }
                     };
                 }

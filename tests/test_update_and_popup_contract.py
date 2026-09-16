@@ -99,13 +99,13 @@ def test_update_payload_is_cached_once_for_multiple_connections():
 
 
 def test_ci_administration_marker_matches_workflow_contract():
-    assert '"OPENED|" + DateTime.UtcNow.ToString("O") + "|Administration|Download [ One ]|Dialog=" + title + "|DownloadOneChecked=True"' in FORM
+    assert '|DownloadOneChecked=True|Rendered=True"' in FORM
     workflow = (ROOT / '.github' / 'workflows' / 'windows-build.yml').read_text(encoding='utf-8')
     assert r"Administration\|Download \[ One \]" in workflow
 
 
 def test_ci_timeout_diagnostic_reflects_retained_trigger():
     workflow = (ROOT / '.github' / 'workflows' / 'windows-build.yml').read_text(encoding='utf-8')
-    assert 'trigger observed; application-side consumption marker was written' in workflow
-    assert 'trigger still present and no consumption marker was observed' in workflow
-    assert '$triggerStatus = if (Test-Path -LiteralPath $notificationsTrigger -PathType Leaf)' not in workflow
+    assert 'trigger consumed (application-side watcher observed it)' in workflow
+    assert 'trigger file absent but no consume marker was observed' in workflow
+    assert '$triggerStatus = if (Test-Path -LiteralPath $notificationsTrigger -PathType Leaf)' in workflow

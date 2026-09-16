@@ -127,6 +127,13 @@ namespace ZeroTrace_Security_Official
         private readonly HashSet<string> pendingTelemetryRefreshes = new HashSet<string>(StringComparer.Ordinal);
         private readonly BlockedConnectionStore blockedConnectionStore = new BlockedConnectionStore();
         private readonly HashSet<string> blockedConnectionRejectionLogged = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly ZtsecPluginManager pluginManager;
+        private DevExpress.XtraGrid.GridControl pluginManagerGrid;
+        private DevExpress.XtraGrid.Views.Grid.GridView pluginManagerGridView;
+        private DataTable pluginManagerTable;
+        private ContextMenuStrip pluginManagerContextMenu;
+        private ToolStripMenuItem pluginLoadItem;
+        private ToolStripMenuItem pluginUnloadItem;
         private readonly Dictionary<string, PendingCommand> pendingCommands = new Dictionary<string, PendingCommand>(StringComparer.Ordinal);
         // Stores the ACK/ERR outcome (true=ACK, false=ERR) for file-delivery commands
         // so the file-command dialog can poll and display per-connection results.
@@ -235,6 +242,10 @@ namespace ZeroTrace_Security_Official
             KeyDown += Form1_KeyDown;
 
             InitializeAdditionalNavigationPages();
+            pluginManager = new ZtsecPluginManager(GetPluginConnectionSnapshot, SendPluginText, SendPluginBytes, UnloadPluginClient, SendPluginFile, BeginPluginReceive, CompletePluginReceive, delegate(string message) { LogServerEvent(message, LogType.Data); });
+            InitializePluginManagerPage();
+            ConfigureDynamicPluginMenu();
+            this.FormClosed += delegate { try { pluginManager.StopAll(); } catch { } };
             InitializeNotificationsPage();
             InitializeServerLogsPage();
             InitializeBlockedConnectionsPage();
@@ -2977,6 +2988,18 @@ namespace ZeroTrace_Security_Official
                         {
                             UpdateConnectionPing(connectionId);
                         }
+                        else if (line.StartsWith("PLUGIN_OUT:", StringComparison.Ordinal))
+                        {
+                            string payload = line.Substring("PLUGIN_OUT:".Length);
+                            int split = payload.IndexOf(':');
+                            if (split > 0)
+                            {
+                                string eventName = payload.Substring(0, split);
+                                byte[] bytes;
+                                try { bytes = Convert.FromBase64String(payload.Substring(split + 1)); } catch { bytes = new byte[0]; }
+                                pluginManager.RouteAgentMessage(connectionId, eventName, bytes);
+                            }
+                        }
                         else if (line.StartsWith("ACK:", StringComparison.Ordinal))
                         {
                             string command = line.Substring(4).Trim().ToUpperInvariant();
@@ -4254,6 +4277,233 @@ namespace ZeroTrace_Security_Official
             }
         }
 
+
+        private void InitializePluginManagerPage()
+        {
+            pluginManagerTabPage.Controls.Clear();
+            pluginManagerTabPage.BackColor = Color.FromArgb(38, 38, 38);
+            pluginManagerGrid = new DevExpress.XtraGrid.GridControl { Dock = DockStyle.Fill, Name = "pluginManagerGrid", UseEmbeddedNavigator = false };
+            pluginManagerGridView = new DevExpress.XtraGrid.Views.Grid.GridView(pluginManagerGrid);
+            pluginManagerGrid.MainView = pluginManagerGridView;
+            pluginManagerGrid.ViewCollection.Add(pluginManagerGridView);
+            pluginManagerTable = new DataTable("Plugins");
+            pluginManagerTable.Columns.Add("Plugin", typeof(string));
+            pluginManagerTable.Columns.Add("Version", typeof(string));
+            pluginManagerTable.Columns.Add("Server", typeof(string));
+            pluginManagerTable.Columns.Add("Client", typeof(string));
+            pluginManagerTable.Columns.Add("Status", typeof(string));
+            pluginManagerGrid.DataSource = pluginManagerTable;
+            pluginManagerGridView.OptionsBehavior.Editable = false;
+            pluginManagerGridView.OptionsSelection.MultiSelect = true;
+            pluginManagerGridView.OptionsSelection.MultiSelectMode = DevExpress.XtraGrid.Views.Grid.GridMultiSelectMode.RowSelect;
+            pluginManagerGridView.OptionsView.ShowGroupPanel = false;
+            pluginManagerGridView.OptionsView.ShowIndicator = false;
+            pluginManagerGridView.OptionsView.ColumnAutoWidth = false;
+            pluginManagerGridView.RowHeight = 32;
+            pluginManagerGridView.Columns["Plugin"].Caption = "Plugin";
+            pluginManagerGridView.Columns["Version"].Caption = "Version";
+            pluginManagerGridView.Columns["Server"].Caption = "Server DLL";
+            pluginManagerGridView.Columns["Client"].Caption = "Client DLL";
+            pluginManagerGridView.Columns["Status"].Caption = "Status";
+            pluginManagerGridView.Columns["Plugin"].Width = 180;
+            pluginManagerGridView.Columns["Version"].Width = 100;
+            pluginManagerGridView.Columns["Server"].Width = 270;
+            pluginManagerGridView.Columns["Client"].Width = 270;
+            pluginManagerGridView.Columns["Status"].Width = 110;
+            pluginManagerContextMenu = new ContextMenuStrip { ShowImageMargin = false, ShowCheckMargin = false };
+            pluginLoadItem = new ToolStripMenuItem("Load Plugin");
+            pluginUnloadItem = new ToolStripMenuItem("Unload Plugin");
+            pluginLoadItem.Click += delegate { LoadPluginFromDialog(); };
+            pluginUnloadItem.Click += delegate { UnloadSelectedPlugin(); };
+            pluginManagerContextMenu.Items.Add(pluginLoadItem);
+            pluginManagerContextMenu.Items.Add(pluginUnloadItem);
+            pluginManagerGrid.ContextMenuStrip = pluginManagerContextMenu;
+            pluginManagerGrid.MouseDoubleClick += delegate { StartSelectedPlugin(); };
+            pluginManagerGrid.KeyDown += delegate(object sender, KeyEventArgs e) { if (e.KeyCode == Keys.Enter) { e.Handled = true; StartSelectedPlugin(); } };
+            pluginManagerContextMenu.Opening += delegate { pluginUnloadItem.Enabled = GetSelectedPluginName() != null; };
+            pluginManagerTabPage.Controls.Add(pluginManagerGrid);
+            RefreshPluginManagerGrid();
+        }
+
+        private void LoadPluginFromDialog()
+        {
+            using (OpenFileDialog dialog = new OpenFileDialog { Title = "Load Server Plugin", Filter = "Plugin server (*.server.dll)|*.server.dll", CheckFileExists = true, Multiselect = false })
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                LoadedPlugin loaded;
+                string error;
+                if (!pluginManager.TryLoadServer(dialog.FileName, out loaded, out error))
+                {
+                    MessageBox.Show(this, error, "Plugin Load Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+                RefreshPluginManagerGrid();
+                LogServerEvent("Plugin loaded: " + loaded.Name, LogType.Success);
+            }
+        }
+
+        private string GetSelectedPluginName()
+        {
+            if (pluginManagerGridView == null) return null;
+            int row = pluginManagerGridView.FocusedRowHandle;
+            if (row < 0) return null;
+            return Convert.ToString(pluginManagerGridView.GetRowCellValue(row, "Plugin"));
+        }
+
+        private void UnloadSelectedPlugin()
+        {
+            string name = GetSelectedPluginName();
+            if (string.IsNullOrWhiteSpace(name)) return;
+            if (MessageBox.Show(this, "Unload plugin '" + name + "'?", "Unload Plugin", MessageBoxButtons.OKCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.OK) return;
+            if (pluginManager.Unload(name)) { RefreshPluginManagerGrid(); ConfigureDynamicPluginMenu(); }
+        }
+
+        private void StartSelectedPlugin()
+        {
+            string name = GetSelectedPluginName();
+            if (string.IsNullOrWhiteSpace(name)) return;
+            LoadedPlugin p = pluginManager.Snapshot().FirstOrDefault(x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase));
+            if (p == null) return;
+            string error;
+            if (!pluginManager.Start(name, out error))
+            {
+                MessageBox.Show(this, error, "Plugin Start Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+            RefreshPluginManagerGrid();
+            LogServerEvent("Plugin active: " + p.Name, LogType.Success);
+        }
+
+        private void RefreshPluginManagerGrid()
+        {
+            if (pluginManagerTable == null) return;
+            pluginManagerTable.BeginLoadData();
+            pluginManagerTable.Rows.Clear();
+            foreach (LoadedPlugin p in pluginManager.Snapshot())
+                pluginManagerTable.Rows.Add(p.Name, p.Version, Path.GetFileName(p.ServerPath), Path.GetFileName(p.ClientPath), p.Running ? "Loaded" : "Stopped");
+            pluginManagerTable.EndLoadData();
+            if (pluginManagerGridView != null) pluginManagerGridView.RefreshData();
+            ConfigureDynamicPluginMenu();
+        }
+
+        private void ConfigureDynamicPluginMenu()
+        {
+            if (connectionsPluginsMenu == null) return;
+            connectionsPluginsMenu.ItemLinks.Clear();
+            foreach (LoadedPlugin plugin in pluginManager == null ? new List<LoadedPlugin>() : pluginManager.Snapshot())
+            {
+                LoadedPlugin captured = plugin;
+                DevExpress.XtraBars.BarButtonItem item = CreateConnectionMenuItem(captured.Name, delegate {
+                    List<string> ids = GetSelectedConnectionIdsList();
+                    foreach (string cid in ids) SendPluginText(cid, captured.Name, "ping:plugin");
+                });
+                connectionsPluginsMenu.AddItem(item);
+            }
+            if (connectionsPluginsMenu.ItemLinks.Count == 0)
+                connectionsPluginsMenu.Visibility = DevExpress.XtraBars.BarItemVisibility.Never;
+            else
+                connectionsPluginsMenu.Visibility = DevExpress.XtraBars.BarItemVisibility.Always;
+        }
+
+        private ZtsecPluginConnection[] GetPluginConnectionSnapshot()
+        {
+            Func<ZtsecPluginConnection[]> snapshot = delegate
+            {
+                if (clientsTable == null) return new ZtsecPluginConnection[0];
+                List<ZtsecPluginConnection> list = new List<ZtsecPluginConnection>();
+                foreach (DataRow row in clientsTable.Rows)
+                    list.Add(new ZtsecPluginConnection {
+                        ConnectionId = Convert.ToString(row["ConnectionId"]), UserName = Convert.ToString(row["UserName"]),
+                        ComputerName = Convert.ToString(row["Nickname"]), Fingerprint = Convert.ToString(row["Fingerprint"]),
+                        Version = Convert.ToString(row["Version"]), IpAddress = Convert.ToString(row["IP"])
+                    });
+                return list.ToArray();
+            };
+            if (InvokeRequired) return (ZtsecPluginConnection[])Invoke(snapshot);
+            return snapshot();
+        }
+
+        private bool SendPluginText(string connectionId, string pluginName, string message)
+        {
+            string raw = "CMD:PLUGIN_MSG:" + pluginName + ":" + Convert.ToBase64String(Encoding.UTF8.GetBytes(message ?? string.Empty));
+            return SendPluginRaw(connectionId, raw, "PLUGIN_MSG:" + pluginName);
+        }
+
+        private bool SendPluginBytes(string connectionId, string pluginName, byte[] payload)
+        {
+            byte[] data = payload ?? new byte[0];
+            string raw = "CMD:PLUGIN_MSG:" + pluginName + ":" + Convert.ToBase64String(data);
+            return SendPluginRaw(connectionId, raw, "PLUGIN_MSG:" + pluginName);
+        }
+
+        private bool UnloadPluginClient(string connectionId, string pluginName)
+        {
+            return SendPluginRaw(connectionId, "CMD:UNLOAD:" + pluginName, "PLUGIN_OUT:" + pluginName);
+        }
+
+        private bool SendPluginRaw(string connectionId, string raw, string ackKey)
+        {
+            TcpClient client;
+            lock (connectionStateLock) if (!connectedClients.TryGetValue(connectionId, out client)) return false;
+            Guid id = Guid.NewGuid();
+            string key = connectionId + "|" + ackKey.ToUpperInvariant();
+            TrackPendingCommand(connectionId, ackKey, id, true);
+            try
+            {
+                byte[] bytes = Encoding.UTF8.GetBytes(raw + "\n");
+                NetworkStream stream = client.GetStream(); stream.Write(bytes, 0, bytes.Length); stream.Flush();
+                DateTime deadline = DateTime.UtcNow.AddSeconds(10);
+                while (DateTime.UtcNow < deadline)
+                {
+                    lock (connectionStateLock)
+                    {
+                        bool? result = null;
+                        if (!pendingCommands.ContainsKey(key) && completedCommandResults.TryGetValue(key, out bool ack)) { result = ack; completedCommandResults.Remove(key); }
+                        if (result.HasValue) return result.Value;
+                    }
+                    Thread.Sleep(25);
+                }
+                RemovePendingCommandIfCurrent(key, id);
+                return false;
+            }
+            catch
+            {
+                RemovePendingCommandIfCurrent(key, id);
+                return false;
+            }
+        }
+
+        private bool SendPluginFile(string connectionId, string pluginName, string localPath)
+        {
+            if (string.IsNullOrWhiteSpace(localPath) || !File.Exists(localPath)) return false;
+            FileInfo info = new FileInfo(localPath);
+            if (info.Length == 0 || info.Length > 256L * 1024L * 1024L) return false;
+            string hash;
+            using (SHA256 sha = SHA256.Create())
+            using (FileStream fs = File.OpenRead(localPath))
+                hash = BitConverter.ToString(sha.ComputeHash(fs)).Replace("-", "").ToLowerInvariant();
+            string transferId = hash;
+            if (!SendPluginRaw(connectionId, "CMD:PLUGIN_BEGIN:" + pluginName + ":" + transferId + ":" + info.Length + ":" + hash + ":" + Path.GetFileName(localPath), "PLUGIN_BEGIN:" + transferId)) return false;
+            const int chunk = 128 * 1024;
+            byte[] buffer = new byte[chunk];
+            using (FileStream fs = File.OpenRead(localPath))
+            {
+                long offset = 0;
+                int count;
+                while ((count = fs.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    byte[] part = new byte[count];
+                    Buffer.BlockCopy(buffer, 0, part, 0, count);
+                    if (!SendPluginRaw(connectionId, "CMD:PLUGIN_CHUNK:" + transferId + ":" + offset + ":" + Convert.ToBase64String(part), "PLUGIN_CHUNK:" + transferId + ":" + offset)) return false;
+                    offset += count;
+                }
+            }
+            return SendPluginRaw(connectionId, "CMD:PLUGIN_END:" + transferId, "PLUGIN_END:" + transferId);
+        }
+
+        private bool BeginPluginReceive(string connectionId, string transferId, string fileName, long length, string sha256) { return true; }
+        private bool CompletePluginReceive(string connectionId, string transferId) { return true; }
+
         private void InitializeAdditionalNavigationPages()
         {
             autoTasksTabPage = new DevExpress.XtraTab.XtraTabPage();
@@ -5176,12 +5426,6 @@ namespace ZeroTrace_Security_Official
             connectionsNetworkingMenu.AddItem(connectionsBlockItem);
 
             connectionsPluginsMenu = CreateConnectionMenuGroup("Plugins", "menu_plugins.svg");
-            connectionsExPlugin1Item = CreateConnectionMenuItem("ExPlugin 1", delegate { });
-            connectionsExPlugin2Item = CreateConnectionMenuItem("ExPlugin 2", delegate { });
-            connectionsExPlugin3Item = CreateConnectionMenuItem("ExPlugin 3", delegate { });
-            connectionsPluginsMenu.AddItem(connectionsExPlugin1Item);
-            connectionsPluginsMenu.AddItem(connectionsExPlugin2Item);
-            connectionsPluginsMenu.AddItem(connectionsExPlugin3Item);
 
             connectionsManagementMenu = CreateConnectionMenuGroup("Management", "menu_management.svg");
             connectionsSleepItem = CreateConnectionMenuItem("Sleep", delegate {
@@ -5209,6 +5453,7 @@ namespace ZeroTrace_Security_Official
             connectionsPopupMenu.AddItem(connectionsNetworkingMenu);
             connectionsPopupMenu.AddItem(connectionsPluginsMenu);
             connectionsPopupMenu.AddItem(connectionsManagementMenu);
+            ConfigureDynamicPluginMenu();
 
         }
 
